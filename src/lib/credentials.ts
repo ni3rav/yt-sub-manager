@@ -29,13 +29,7 @@ export function getMasterKey(customDir?: string): Buffer {
   }
 
   const newKey = crypto.randomBytes(KEY_BYTES);
-  fs.writeFileSync(keyPath, newKey);
-  try {
-    fs.chmodSync(keyPath, 0o600);
-  } catch {
-    // Ignore chmod errors on unsupported filesystems/OS
-  }
-
+  fs.writeFileSync(keyPath, newKey, { mode: 0o600 });
   return newKey;
 }
 
