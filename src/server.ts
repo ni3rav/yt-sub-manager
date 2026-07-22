@@ -5,7 +5,7 @@ import { ensureAppDataDir } from "./lib/paths";
 import { decryptCredentials, encryptCredentials, deleteCredentials, type AppCredentials } from "./lib/credentials";
 import { openBrowser } from "./lib/browser";
 import { createOAuth2Client, getStoredOAuth2Client, verifyOrRefreshTokens, AuthRevokedError } from "./lib/oauth";
-import { initDatabase, upsertChannels, getChannelsStats, getChannels, getAllMatchingChannelIds, getDistinctCategories, bulkTagAndCategory, getSubscriptionIds, deleteChannels, InvalidSortError } from "./lib/db";
+import { initDatabase, upsertChannels, getChannelsStats, getChannels, getAllMatchingChannelIds, getDistinctCategories, bulkTagAndCategory, getSubscriptionIds, deleteChannels, InvalidSortError, createExportStream } from "./lib/db";
 import { fetchAllSubscriptions, createYouTubeClient, QuotaExceededError, isQuotaExceededError } from "./lib/youtube";
 
 export interface ServerOptions {
@@ -357,6 +357,59 @@ export function createAppServer(options: ServerOptions = {}): Server<unknown> {
             });
           } catch (err: any) {
             return Response.json({ error: err?.message || "Failed to unsubscribe channels." }, { status: 500 });
+          }
+        },
+      },
+
+      "/api/export": {
+        async GET(req) {
+          const authErr = await authenticateRequest(appDataDir);
+          if (authErr) return authErr;
+
+          const url = new URL(req.url);
+          const formatRaw = url.searchParams.get("format")?.toLowerCase();
+          if (formatRaw !== "csv" && formatRaw !== "json") {
+            return Response.json(
+              { error: "Invalid format. Must be 'csv' or 'json'." },
+              { status: 400 }
+            );
+          }
+          const format: "csv" | "json" = formatRaw;
+
+          const scopeRaw = url.searchParams.get("scope")?.toLowerCase();
+          const scope: "filtered" | "all" = scopeRaw === "all" ? "all" : "filtered";
+
+          const q = url.searchParams.get("q") || undefined;
+          const sortBy = (url.searchParams.get("sortBy") as any) || undefined;
+          const sortDir = (url.searchParams.get("sortDir") as any) || undefined;
+          const category = url.searchParams.get("category") || undefined;
+          const tag = url.searchParams.get("tag") || undefined;
+
+          try {
+            const stream = createExportStream(db, {
+              format,
+              scope,
+              q,
+              sortBy,
+              sortDir,
+              category,
+              tag,
+            });
+
+            const contentType = format === "csv" ? "text/csv; charset=utf-8" : "application/json; charset=utf-8";
+            const filename = `subscriptions.${format}`;
+
+            return new Response(stream, {
+              headers: {
+                "Content-Type": contentType,
+                "Content-Disposition": `attachment; filename="${filename}"`,
+              },
+            });
+          } catch (err: any) {
+            if (err instanceof InvalidSortError) {
+              return Response.json({ error: err.message }, { status: 400 });
+            }
+            return Response.json({ error: err?.message || "Failed to export subscriptions." }, { status: 500 });
           }
         },
       },

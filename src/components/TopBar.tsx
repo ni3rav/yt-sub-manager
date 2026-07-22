@@ -1,4 +1,4 @@
-import { Search, RefreshCw, LogOut, CheckCircle2, PlaySquare, ArrowUpDown, Filter, Clock } from "lucide-react";
+import { Search, RefreshCw, LogOut, CheckCircle2, PlaySquare, ArrowUpDown, Filter, Clock, Tag } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface TopBarProps {

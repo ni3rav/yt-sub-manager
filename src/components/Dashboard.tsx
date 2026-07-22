@@ -3,6 +3,7 @@ import type { ChannelRecord } from "@/lib/db";
 import { TopBar } from "./TopBar";
 import { ChannelTable } from "./ChannelTable";
 import { BulkActionBar } from "./BulkActionBar";
+import { ExportControls } from "./ExportControls";
 import { UnsubscribeConfirmModal } from "./UnsubscribeConfirmModal";
 import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Layers } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -421,6 +422,15 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
             </div>
           )}
         </div>
+
+        {/* Export Controls Section */}
+        <ExportControls
+          searchQuery={debouncedSearch}
+          tagQuery={debouncedTag}
+          category={category}
+          sortBy={sortBy}
+          sortDir={sortDir}
+        />
       </main>
 
       {/* Floating Bulk Action Bar */}

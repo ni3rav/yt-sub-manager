@@ -324,4 +324,120 @@ export function deleteChannels(db: Database, channelIds: string[]): number {
   return deletedCount;
 }
 
+export interface ExportChannelsOptions {
+  format: "csv" | "json";
+  scope?: "filtered" | "all";
+  q?: string;
+  sortBy?: "title" | "subscribed_at" | "video_count" | "subscriber_count";
+  sortDir?: "asc" | "desc";
+  category?: string;
+  tag?: string;
+}
+
+export function escapeCsvCell(val: string | number | null | undefined): string {
+  if (val === null || val === undefined) return "";
+  const str = String(val);
+  if (str.includes('"') || str.includes(",") || str.includes("\n") || str.includes("\r")) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+export function parseTags(tagsJson: string | null | undefined): string[] {
+  if (!tagsJson) return [];
+  try {
+    const parsed = JSON.parse(tagsJson);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function createExportStream(db: Database, options: ExportChannelsOptions): ReadableStream {
+  const {
+    format,
+    scope = "filtered",
+    q,
+    sortBy = "title",
+    sortDir = "asc",
+    category,
+    tag,
+  } = options;
+
+  if (sortBy && !ALLOWED_SORT_FIELDS.has(sortBy)) {
+    throw new InvalidSortError(`Invalid sortBy parameter: ${sortBy}`);
+  }
+
+  const sortColumn = ALLOWED_SORT_FIELDS.has(sortBy) ? sortBy : "title";
+  const direction = sortDir.toLowerCase() === "desc" ? "DESC" : "ASC";
+
+  const { whereSql, params } = scope === "all"
+    ? { whereSql: "", params: [] }
+    : buildWhereClause({ q, category, tag });
+
+  const querySql = `
+    SELECT * FROM channels
+    ${whereSql}
+    ORDER BY ${sortColumn} ${direction}
+  `;
+
+  const encoder = new TextEncoder();
+
+  return new ReadableStream({
+    start(controller) {
+      const statement = db.prepare(querySql);
+      const iterator = statement.iterate(...params) as Iterable<ChannelRecord>;
+
+      if (format === "csv") {
+        const header = "channel_id,subscription_id,title,description,thumbnail_url,subscribed_at,video_count,subscriber_count,category,tags\n";
+        controller.enqueue(encoder.encode(header));
+        for (const row of iterator) {
+          const tagsStr = parseTags(row.tags).join(", ");
+          const line = [
+            escapeCsvCell(row.channel_id),
+            escapeCsvCell(row.subscription_id),
+            escapeCsvCell(row.title),
+            escapeCsvCell(row.description),
+            escapeCsvCell(row.thumbnail_url),
+            escapeCsvCell(row.subscribed_at),
+            escapeCsvCell(row.video_count),
+            escapeCsvCell(row.subscriber_count),
+            escapeCsvCell(row.category),
+            escapeCsvCell(tagsStr),
+          ].join(",") + "\n";
+          controller.enqueue(encoder.encode(line));
+        }
+      } else {
+        controller.enqueue(encoder.encode("[\n"));
+        let isFirst = true;
+        for (const row of iterator) {
+          const jsonObj = {
+            channel_id: row.channel_id,
+            subscription_id: row.subscription_id,
+            title: row.title,
+            description: row.description ?? null,
+            thumbnail_url: row.thumbnail_url ?? null,
+            subscribed_at: row.subscribed_at ?? null,
+            video_count: row.video_count ?? null,
+            subscriber_count: row.subscriber_count ?? null,
+            category: row.category ?? null,
+            tags: parseTags(row.tags),
+          };
+          const jsonStr = JSON.stringify(jsonObj);
+          if (!isFirst) {
+            controller.enqueue(encoder.encode(",\n" + jsonStr));
+          } else {
+            controller.enqueue(encoder.encode(jsonStr));
+            isFirst = false;
+          }
+        }
+        controller.enqueue(encoder.encode("\n]"));
+      }
+
+      controller.close();
+    },
+  });
+}
+
+
 
