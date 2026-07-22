@@ -9,6 +9,14 @@ const ALGORITHM = "aes-256-gcm";
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
 
+export interface AppCredentials {
+  clientId: string;
+  clientSecret: string;
+  accessToken?: string;
+  refreshToken?: string;
+  expiryDate?: number | null;
+}
+
 export function getMasterKeyPath(customDir?: string): string {
   return path.join(getAppDataDir(customDir), KEY_FILE_NAME);
 }

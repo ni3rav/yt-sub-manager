@@ -1,0 +1,114 @@
+import { useState } from "react";
+import { PlaySquare, LogOut, CheckCircle2, RefreshCw, Layers, Search, Filter } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+
+interface DashboardProps {
+  onDisconnect: () => void;
+}
+
+export function Dashboard({ onDisconnect }: DashboardProps) {
+  const [disconnecting, setDisconnecting] = useState(false);
+
+  const handleDisconnect = async () => {
+    setDisconnecting(true);
+    try {
+      const res = await fetch("/api/auth/disconnect", { method: "POST" });
+      if (res.ok) {
+        onDisconnect();
+      } else {
+        console.error("Failed to disconnect");
+      }
+    } catch (err) {
+      console.error("Disconnect request error:", err);
+    } finally {
+      setDisconnecting(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-red-500 selection:text-white">
+      {/* Top Navbar */}
+      <header className="border-b border-slate-800 bg-slate-900/60 backdrop-blur-md sticky top-0 z-50 px-6 py-4 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-red-600/10 border border-red-500/20 rounded-xl text-red-500 shadow-sm shadow-red-500/10">
+            <PlaySquare className="w-6 h-6" />
+          </div>
+          <div>
+            <h1 className="font-bold text-lg leading-tight tracking-tight bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent">
+              YouTube Subscription Manager
+            </h1>
+            <p className="text-xs text-slate-400">Authenticated &amp; Ready</p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4">
+          <div className="hidden sm:flex items-center gap-2 text-xs font-mono bg-emerald-950/40 border border-emerald-500/20 px-3 py-1.5 rounded-lg text-emerald-400">
+            <CheckCircle2 className="w-3.5 h-3.5" />
+            <span>Connected</span>
+          </div>
+
+          <Button
+            onClick={handleDisconnect}
+            disabled={disconnecting}
+            variant="outline"
+            size="sm"
+            className="border-slate-800 hover:bg-slate-800 text-slate-300 hover:text-white flex items-center gap-2"
+          >
+            <LogOut className="w-4 h-4 text-red-400" />
+            <span>{disconnecting ? "Disconnecting..." : "Disconnect"}</span>
+          </Button>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="flex-1 max-w-6xl w-full mx-auto p-6 md:p-10 space-y-8">
+        <Card className="bg-slate-900/80 border-slate-800 text-slate-100 shadow-xl">
+          <CardHeader className="space-y-1">
+            <div className="flex items-center gap-2 text-emerald-400 text-xs font-semibold uppercase tracking-wider">
+              <CheckCircle2 className="w-4 h-4" />
+              <span>Google OAuth Session Active</span>
+            </div>
+            <CardTitle className="text-2xl font-bold text-white">Subscription Management Dashboard</CardTitle>
+            <CardDescription className="text-slate-400 text-sm">
+              Your Google OAuth credentials are securely stored and encrypted locally. Next step: sync channels into local SQLite database.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="pt-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-2">
+                <div className="flex items-center gap-2 text-slate-200 font-semibold text-sm">
+                  <RefreshCw className="w-4 h-4 text-blue-400" />
+                  Sync Ready
+                </div>
+                <p className="text-xs text-slate-400">
+                  Ready to fetch and paginate YouTube subscriptions into your local database.
+                </p>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-2">
+                <div className="flex items-center gap-2 text-slate-200 font-semibold text-sm">
+                  <Search className="w-4 h-4 text-amber-400" />
+                  Live Search &amp; Filter
+                </div>
+                <p className="text-xs text-slate-400">
+                  Instant search, category tagging, and subscriber count sorting ready to mount.
+                </p>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-2">
+                <div className="flex items-center gap-2 text-slate-200 font-semibold text-sm">
+                  <Layers className="w-4 h-4 text-purple-400" />
+                  Bulk Operations
+                </div>
+                <p className="text-xs text-slate-400">
+                  Bulk tag, categorise, or unsubscribe with quota-aware rate limits.
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </main>
+    </div>
+  );
+}

@@ -4,19 +4,19 @@
 
 **Blocked by:** 01 — foundation (credential store, server, app data dir).
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] `GET /api/auth/status` returns `{ authenticated: true }` when valid credentials are stored, `{ authenticated: false, setupRequired: true }` otherwise
-- [ ] The React frontend shows `<SetupScreen>` when auth status is not authenticated, and the main `<Dashboard>` shell when authenticated
-- [ ] `<SetupScreen>` displays clear step-by-step instructions for Google Cloud Console setup (create project → enable YouTube Data API v3 → create Desktop app OAuth Client ID) and a link to the Google Cloud Console
-- [ ] `<SetupScreen>` has Client ID and Client Secret input fields and a Connect button
-- [ ] `POST /api/auth/setup` accepts `{ clientId, clientSecret }`, encrypts and persists them, constructs an OAuth2 consent URL with redirect URI `http://127.0.0.1:<port>/oauth/callback` and scope `https://www.googleapis.com/auth/youtube`, and returns `{ authUrl }` to the frontend
-- [ ] The frontend navigates the browser to the returned `authUrl` after a successful setup submission
-- [ ] `GET /oauth/callback` exchanges the `code` query param for access and refresh tokens, encrypts and stores them alongside the client credentials, and redirects to `/`
-- [ ] Client Secret and tokens are never present in any API response body sent to the browser
-- [ ] After successful auth, `GET /api/auth/status` returns `{ authenticated: true }`
-- [ ] Every subsequent YouTube API call uses the `googleapis` OAuth2 client, which transparently refreshes the access token when it expires
-- [ ] When token refresh fails (e.g. revoked access), `credentials.enc` is deleted, the API returns a 401 with `{ reason: 'auth_revoked' }`, and the frontend routes back to `<SetupScreen>` with the message "Your Google access was revoked. Please reconnect."
-- [ ] `POST /api/auth/disconnect` deletes `credentials.enc` and returns 200; the frontend returns to `<SetupScreen>` on receiving this response
-- [ ] A Disconnect button is visible in the authenticated dashboard shell
-- [ ] HTTP API tests: `/api/auth/status` returns correct shape when credentials present vs absent; `/api/auth/setup` with valid body returns an authUrl; `/oauth/callback` with a stubbed token exchange stores tokens; `/api/auth/disconnect` removes the credentials file
+- [x] `GET /api/auth/status` returns `{ authenticated: true }` when valid credentials are stored, `{ authenticated: false, setupRequired: true }` otherwise
+- [x] The React frontend shows `<SetupScreen>` when auth status is not authenticated, and the main `<Dashboard>` shell when authenticated
+- [x] `<SetupScreen>` displays clear step-by-step instructions for Google Cloud Console setup (create project → enable YouTube Data API v3 → create Desktop app OAuth Client ID) and a link to the Google Cloud Console
+- [x] `<SetupScreen>` has Client ID and Client Secret input fields and a Connect button
+- [x] `POST /api/auth/setup` accepts `{ clientId, clientSecret }`, encrypts and persists them, constructs an OAuth2 consent URL with redirect URI `http://127.0.0.1:<port>/oauth/callback` and scope `https://www.googleapis.com/auth/youtube`, and returns `{ authUrl }` to the frontend
+- [x] The frontend navigates the browser to the returned `authUrl` after a successful setup submission
+- [x] `GET /oauth/callback` exchanges the `code` query param for access and refresh tokens, encrypts and stores them alongside the client credentials, and redirects to `/`
+- [x] Client Secret and tokens are never present in any API response body sent to the browser
+- [x] After successful auth, `GET /api/auth/status` returns `{ authenticated: true }`
+- [x] Every subsequent YouTube API call uses the `googleapis` OAuth2 client, which transparently refreshes the access token when it expires
+- [x] When token refresh fails (e.g. revoked access), `credentials.enc` is deleted, the API returns a 401 with `{ reason: 'auth_revoked' }`, and the frontend routes back to `<SetupScreen>` with the message "Your Google access was revoked. Please reconnect."
+- [x] `POST /api/auth/disconnect` deletes `credentials.enc` and returns 200; the frontend returns to `<SetupScreen>` on receiving this response
+- [x] A Disconnect button is visible in the authenticated dashboard shell
+- [x] HTTP API tests: `/api/auth/status` returns correct shape when credentials present vs absent; `/api/auth/setup` with valid body returns an authUrl; `/oauth/callback` with a stubbed token exchange stores tokens; `/api/auth/disconnect` removes the credentials file
