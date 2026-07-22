@@ -4,7 +4,7 @@
 
 **Blocked by:** 05 — bulk tag/category, 06 — bulk unsubscribe with quota handling, 07 — export (all features must be complete before the binary is finalised).
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `package.json` has a `build:binary` script that runs `bun build ./src/index.ts --compile --outfile yt-sub-manager`
 - [ ] Running `bun run build:binary` produces an executable file named `yt-sub-manager` at the repo root
