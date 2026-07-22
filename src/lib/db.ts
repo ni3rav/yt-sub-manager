@@ -392,7 +392,7 @@ export function createExportStream(db: Database, options: ExportChannelsOptions)
         const header = "channel_id,subscription_id,title,description,thumbnail_url,subscribed_at,video_count,subscriber_count,category,tags\n";
         controller.enqueue(encoder.encode(header));
         for (const row of iterator) {
-          const tagsStr = parseTags(row.tags).join(", ");
+          const tagsStr = parseTags(row.tags).join(",");
           const line = [
             escapeCsvCell(row.channel_id),
             escapeCsvCell(row.subscription_id),

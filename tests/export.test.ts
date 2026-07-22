@@ -130,7 +130,7 @@ describe("GET /api/export HTTP API Seam", () => {
     expect(csvText).toContain("UC2");
     expect(csvText).toContain("UC3");
     expect(csvText).toContain('"Cooking with Chef, Special"');
-    expect(csvText).toContain("cooking, recipes");
+    expect(csvText).toContain("cooking,recipes");
   });
 
   test("GET /api/export?format=json&scope=filtered&q=cooking returns only matching channels as JSON array", async () => {
