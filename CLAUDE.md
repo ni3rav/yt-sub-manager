@@ -104,3 +104,17 @@ bun --hot ./index.ts
 ```
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in local markdown files under `.scratch/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Using default canonical role labels (needs-triage, ready-for-agent, etc.). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context documentation layout (`CONTEXT.md` and `docs/adr/` at the root). See `docs/agents/domain.md`.
