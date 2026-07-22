@@ -16,6 +16,13 @@ export interface ServerOptions {
   tokenExchanger?: (code: string) => Promise<{ access_token: string; refresh_token?: string; expiry_date?: number }>;
   db?: Database;
   youtubeClient?: any;
+  /**
+   * Override the default `src/index.html` bundle with a pre-built HTML file
+   * (e.g. `dist/index.html` produced by `bun run build`). Use this when
+   * compiling to a binary so that the Tailwind-processed CSS is embedded
+   * rather than the raw source CSS.
+   */
+  indexHtml?: any;
 }
 
 async function authenticateRequest(appDataDir: string): Promise<Response | null> {
@@ -414,7 +421,7 @@ export function createAppServer(options: ServerOptions = {}): Server<unknown> {
         },
       },
 
-      "/*": index,
+      "/*": options.indexHtml ?? index,
     },
     development: process.env.NODE_ENV !== "production" && {
       hmr: true,
