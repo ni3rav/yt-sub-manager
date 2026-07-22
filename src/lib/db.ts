@@ -120,6 +120,110 @@ export function upsertChannels(db: Database, channels: ChannelRecord[]): void {
   transaction(channels);
 }
 
+export interface GetChannelsOptions {
+  q?: string;
+  sortBy?: "title" | "subscribed_at" | "video_count" | "subscriber_count";
+  sortDir?: "asc" | "desc";
+  category?: string;
+  tag?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+const ALLOWED_SORT_FIELDS = new Set(["title", "subscribed_at", "video_count", "subscriber_count"]);
+
+export class InvalidSortError extends Error {
+  constructor(message = "Invalid sortBy parameter.") {
+    super(message);
+    this.name = "InvalidSortError";
+  }
+}
+
+function buildWhereClause(options: { q?: string; category?: string; tag?: string }): { whereSql: string; params: any[] } {
+  const whereClauses: string[] = [];
+  const params: any[] = [];
+
+  if (options.q && options.q.trim()) {
+    whereClauses.push("title LIKE ?");
+    params.push(`%${options.q.trim()}%`);
+  }
+
+  if (options.category && options.category.trim()) {
+    whereClauses.push("category = ?");
+    params.push(options.category.trim());
+  }
+
+  if (options.tag && options.tag.trim()) {
+    whereClauses.push("EXISTS (SELECT 1 FROM json_each(channels.tags) WHERE json_each.value = ?)");
+    params.push(options.tag.trim());
+  }
+
+  const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+  return { whereSql, params };
+}
+
+export function getChannels(db: Database, options: GetChannelsOptions = {}) {
+  const {
+    q,
+    sortBy = "title",
+    sortDir = "asc",
+    category,
+    tag,
+    page = 1,
+    pageSize = 20,
+  } = options;
+
+  if (options.sortBy && !ALLOWED_SORT_FIELDS.has(options.sortBy)) {
+    throw new InvalidSortError(`Invalid sortBy parameter: ${options.sortBy}`);
+  }
+
+  const { whereSql, params } = buildWhereClause({ q, category, tag });
+
+  // Count total matching
+  const countSql = `SELECT COUNT(*) as total FROM channels ${whereSql}`;
+  const countRow = db.prepare(countSql).get(...params) as { total: number } | undefined;
+  const total = countRow?.total ?? 0;
+
+  // Sorting
+  const sortColumn = ALLOWED_SORT_FIELDS.has(sortBy) ? sortBy : "title";
+  const direction = sortDir.toLowerCase() === "desc" ? "DESC" : "ASC";
+
+  // Pagination
+  const pageNum = Math.max(1, Number(page) || 1);
+  const size = Math.max(1, Number(pageSize) || 20);
+  const offset = (pageNum - 1) * size;
+
+  const dataSql = `
+    SELECT * FROM channels
+    ${whereSql}
+    ORDER BY ${sortColumn} ${direction}
+    LIMIT ? OFFSET ?
+  `;
+
+  const channels = db.prepare(dataSql).all(...params, size, offset) as ChannelRecord[];
+
+  return {
+    channels,
+    total,
+    page: pageNum,
+    pageSize: size,
+  };
+}
+
+export function getAllMatchingChannelIds(db: Database, options: Omit<GetChannelsOptions, "page" | "pageSize"> = {}): string[] {
+  const { q, category, tag } = options;
+  const { whereSql, params } = buildWhereClause({ q, category, tag });
+  const rows = db.prepare(`SELECT channel_id FROM channels ${whereSql}`).all(...params) as { channel_id: string }[];
+  return rows.map((r) => r.channel_id);
+}
+
+export function getDistinctCategories(db: Database): string[] {
+  const rows = db
+    .prepare("SELECT DISTINCT category FROM channels WHERE category IS NOT NULL AND category != '' ORDER BY category ASC")
+    .all() as { category: string }[];
+  return rows.map((r) => r.category);
+}
+
 export function getChannelsStats(db: Database): { totalCount: number; lastSyncedAt: string | null } {
   const countRow = db.prepare("SELECT COUNT(*) as count FROM channels").get() as { count: number } | undefined;
   const lastSyncRow = db.prepare("SELECT MAX(last_synced_at) as last_synced_at FROM channels").get() as

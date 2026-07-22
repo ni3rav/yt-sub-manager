@@ -5,7 +5,7 @@ import { ensureAppDataDir } from "./lib/paths";
 import { decryptCredentials, encryptCredentials, deleteCredentials, type AppCredentials } from "./lib/credentials";
 import { openBrowser } from "./lib/browser";
 import { createOAuth2Client, getStoredOAuth2Client, verifyOrRefreshTokens, AuthRevokedError } from "./lib/oauth";
-import { initDatabase, upsertChannels, getChannelsStats } from "./lib/db";
+import { initDatabase, upsertChannels, getChannelsStats, getChannels, getAllMatchingChannelIds, getDistinctCategories, InvalidSortError } from "./lib/db";
 import { fetchAllSubscriptions, createYouTubeClient, QuotaExceededError } from "./lib/youtube";
 
 export interface ServerOptions {
@@ -16,6 +16,21 @@ export interface ServerOptions {
   tokenExchanger?: (code: string) => Promise<{ access_token: string; refresh_token?: string; expiry_date?: number }>;
   db?: Database;
   youtubeClient?: any;
+}
+
+async function authenticateRequest(appDataDir: string): Promise<Response | null> {
+  try {
+    await verifyOrRefreshTokens(appDataDir);
+    return null;
+  } catch (err: any) {
+    if (err instanceof AuthRevokedError) {
+      return Response.json(
+        { error: "Your Google access was revoked. Please reconnect.", reason: "auth_revoked" },
+        { status: 401 }
+      );
+    }
+    return Response.json({ error: "Authentication required." }, { status: 401 });
+  }
 }
 
 export function createAppServer(options: ServerOptions = {}): Server<unknown> {
@@ -37,23 +52,10 @@ export function createAppServer(options: ServerOptions = {}): Server<unknown> {
             return Response.json({ authenticated: false, setupRequired: true });
           }
 
-          try {
-            await verifyOrRefreshTokens(appDataDir);
-            return Response.json({ authenticated: true });
-          } catch (err: any) {
-            if (err instanceof AuthRevokedError) {
-              return Response.json(
-                {
-                  authenticated: false,
-                  setupRequired: true,
-                  reason: "auth_revoked",
-                  error: "Your Google access was revoked. Please reconnect.",
-                },
-                { status: 401 }
-              );
-            }
-            return Response.json({ authenticated: false, setupRequired: true });
-          }
+          const authErr = await authenticateRequest(appDataDir);
+          if (authErr) return authErr;
+
+          return Response.json({ authenticated: true });
         },
       },
 
@@ -158,17 +160,8 @@ export function createAppServer(options: ServerOptions = {}): Server<unknown> {
         },
 
         async POST() {
-          try {
-            await verifyOrRefreshTokens(appDataDir);
-          } catch (err: any) {
-            if (err instanceof AuthRevokedError) {
-              return Response.json(
-                { error: "Your Google access was revoked. Please reconnect.", reason: "auth_revoked" },
-                { status: 401 }
-              );
-            }
-            return Response.json({ error: "Authentication required." }, { status: 401 });
-          }
+          const authErr = await authenticateRequest(appDataDir);
+          if (authErr) return authErr;
 
           const syncTimestamp = new Date().toISOString();
           let ytClient = options.youtubeClient;
@@ -205,6 +198,57 @@ export function createAppServer(options: ServerOptions = {}): Server<unknown> {
               { error: err?.message || "Failed to sync subscriptions." },
               { status: 500 }
             );
+          }
+        },
+      },
+
+      "/api/categories": {
+        async GET() {
+          const authErr = await authenticateRequest(appDataDir);
+          if (authErr) return authErr;
+
+          const categories = getDistinctCategories(db);
+          return Response.json({ categories });
+        },
+      },
+
+      "/api/channels": {
+        async GET(req) {
+          const authErr = await authenticateRequest(appDataDir);
+          if (authErr) return authErr;
+
+          const url = new URL(req.url);
+          const q = url.searchParams.get("q") || undefined;
+          const sortBy = (url.searchParams.get("sortBy") as any) || undefined;
+          const sortDir = (url.searchParams.get("sortDir") as any) || undefined;
+          const category = url.searchParams.get("category") || undefined;
+          const tag = url.searchParams.get("tag") || undefined;
+          const page = url.searchParams.get("page") ? Number(url.searchParams.get("page")) : 1;
+          const pageSize = url.searchParams.get("pageSize") ? Number(url.searchParams.get("pageSize")) : 20;
+          const allIdsOnly = url.searchParams.get("allIdsOnly") === "true";
+
+          try {
+            if (allIdsOnly) {
+              const channelIds = getAllMatchingChannelIds(db, { q, category, tag });
+              return Response.json({ channelIds });
+            }
+
+            const result = getChannels(db, {
+              q,
+              sortBy,
+              sortDir,
+              category,
+              tag,
+              page,
+              pageSize,
+            });
+
+            return Response.json(result);
+          } catch (err: any) {
+            if (err instanceof InvalidSortError) {
+              return Response.json({ error: err.message }, { status: 400 });
+            }
+            return Response.json({ error: err?.message || "Failed to fetch channels." }, { status: 500 });
           }
         },
       },

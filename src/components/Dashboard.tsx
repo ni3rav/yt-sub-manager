@@ -1,7 +1,9 @@
-import { useState, useEffect } from "react";
-import { PlaySquare, LogOut, CheckCircle2, RefreshCw, Layers, Search, AlertTriangle, Clock } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
+import type { ChannelRecord } from "@/lib/db";
+import { TopBar } from "./TopBar";
+import { ChannelTable } from "./ChannelTable";
+import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Layers } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 interface DashboardProps {
   onDisconnect: () => void;
@@ -11,27 +13,113 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
   const [disconnecting, setDisconnecting] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
-  const [channelCount, setChannelCount] = useState<number>(0);
   const [quotaError, setQuotaError] = useState<{ message: string; count: number } | null>(null);
   const [syncSuccessMessage, setSyncSuccessMessage] = useState<string | null>(null);
 
+  // Filter & Sort State
+  const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [tagQuery, setTagQuery] = useState("");
+  const [debouncedTag, setDebouncedTag] = useState("");
+  const [sortBy, setSortBy] = useState("title");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [category, setCategory] = useState("");
+  const [categories, setCategories] = useState<string[]>([]);
+
+  // Pagination State
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [totalChannels, setTotalChannels] = useState(0);
+
+  // Channels & Selection State
+  const [channels, setChannels] = useState<ChannelRecord[]>([]);
+  const [selectedChannelIds, setSelectedChannelIds] = useState<Set<string>>(new Set());
+  const [isLoadingChannels, setIsLoadingChannels] = useState(false);
+
+  // Debounce search inputs
   useEffect(() => {
-    fetchSyncStatus();
+    const timer = setTimeout(() => {
+      setDebouncedSearch(searchQuery);
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedTag(tagQuery);
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [tagQuery]);
+
+  // Fetch Categories on mount
+  const fetchCategories = useCallback(async () => {
+    try {
+      const res = await fetch("/api/categories");
+      if (res.ok) {
+        const data = await res.json();
+        setCategories(data.categories || []);
+      }
+    } catch (err) {
+      console.error("Failed to fetch categories:", err);
+    }
   }, []);
 
-  const fetchSyncStatus = async () => {
+  // Fetch Channels
+  const fetchChannels = useCallback(async () => {
+    setIsLoadingChannels(true);
+    try {
+      const params = new URLSearchParams();
+      if (debouncedSearch) params.set("q", debouncedSearch);
+      if (debouncedTag) params.set("tag", debouncedTag);
+      if (sortBy) params.set("sortBy", sortBy);
+      if (sortDir) params.set("sortDir", sortDir);
+      if (category) params.set("category", category);
+      params.set("page", String(page));
+      params.set("pageSize", String(pageSize));
+
+      const res = await fetch(`/api/channels?${params.toString()}`);
+      if (res.status === 401) {
+        onDisconnect();
+        return;
+      }
+
+      if (res.ok) {
+        const data = await res.json();
+        setChannels(data.channels || []);
+        setTotalChannels(data.total || 0);
+      }
+    } catch (err) {
+      console.error("Failed to fetch channels:", err);
+    } finally {
+      setIsLoadingChannels(false);
+    }
+  }, [debouncedSearch, debouncedTag, sortBy, sortDir, category, page, pageSize, onDisconnect]);
+
+  // Fetch Sync Status
+  const fetchSyncStatus = useCallback(async () => {
     try {
       const res = await fetch("/api/sync");
       if (res.ok) {
         const data = await res.json();
         setLastSyncedAt(data.lastSyncedAt || null);
-        setChannelCount(data.count || 0);
       }
     } catch (err) {
       console.error("Failed to fetch sync status:", err);
     }
-  };
+  }, []);
 
+  useEffect(() => {
+    fetchSyncStatus();
+    fetchCategories();
+  }, [fetchSyncStatus, fetchCategories]);
+
+  useEffect(() => {
+    fetchChannels();
+  }, [fetchChannels]);
+
+  // Sync Action
   const handleSync = async () => {
     setIsSyncing(true);
     setQuotaError(null);
@@ -47,7 +135,6 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
       }
 
       if (res.ok) {
-        setChannelCount(data.count ?? 0);
         if (data.lastSyncedAt) {
           setLastSyncedAt(data.lastSyncedAt);
         }
@@ -61,8 +148,9 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
         } else {
           setSyncSuccessMessage(`Successfully synced ${data.count} channel${data.count === 1 ? "" : "s"}.`);
         }
-      } else {
-        console.error("Sync error:", data.error);
+
+        fetchCategories();
+        fetchChannels();
       }
     } catch (err) {
       console.error("Failed to sync:", err);
@@ -81,79 +169,93 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
         console.error("Failed to disconnect");
       }
     } catch (err) {
-      console.error("Disconnect request error:", err);
+      console.error("Disconnect error:", err);
     } finally {
-      setDisconnecting(false);
+      setIsSyncing(false);
     }
   };
 
-  const formatTimestamp = (isoString: string | null) => {
-    if (!isoString) return "Never synced";
-    try {
-      const d = new Date(isoString);
-      return d.toLocaleString(undefined, {
-        dateStyle: "medium",
-        timeStyle: "short",
-      });
-    } catch {
-      return isoString;
+  // Selection Logic
+  const handleToggleSelectChannel = (channelId: string) => {
+    setSelectedChannelIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(channelId)) {
+        next.delete(channelId);
+      } else {
+        next.add(channelId);
+      }
+      return next;
+    });
+  };
+
+  const handleToggleSelectAll = async () => {
+    const isAllSelected = totalChannels > 0 && selectedChannelIds.size === totalChannels;
+
+    if (isAllSelected) {
+      // Clear all
+      setSelectedChannelIds(new Set());
+    } else {
+      // Fetch all matching channel IDs for current filter
+      try {
+        const params = new URLSearchParams();
+        if (debouncedSearch) params.set("q", debouncedSearch);
+        if (debouncedTag) params.set("tag", debouncedTag);
+        if (category) params.set("category", category);
+        params.set("allIdsOnly", "true");
+
+        const res = await fetch(`/api/channels?${params.toString()}`);
+        if (res.ok) {
+          const data = await res.json();
+          setSelectedChannelIds(new Set(data.channelIds || []));
+        } else {
+          // Fallback to selecting current page channels
+          setSelectedChannelIds(new Set(channels.map((c) => c.channel_id)));
+        }
+      } catch {
+        setSelectedChannelIds(new Set(channels.map((c) => c.channel_id)));
+      }
     }
   };
+
+  const isAllSelected = totalChannels > 0 && selectedChannelIds.size === totalChannels;
+  const totalPages = Math.ceil(totalChannels / pageSize) || 1;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-red-500 selection:text-white">
-      {/* Top Navbar */}
-      <header className="border-b border-slate-800 bg-slate-900/60 backdrop-blur-md sticky top-0 z-50 px-6 py-4 flex items-center justify-between flex-wrap gap-4">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-red-600/10 border border-red-500/20 rounded-xl text-red-500 shadow-sm shadow-red-500/10">
-            <PlaySquare className="w-6 h-6" />
-          </div>
-          <div>
-            <h1 className="font-bold text-lg leading-tight tracking-tight bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent">
-              YouTube Subscription Manager
-            </h1>
-            <p className="text-xs text-slate-400">Authenticated &amp; Ready</p>
-          </div>
-        </div>
+      {/* TopBar Component */}
+      <TopBar
+        searchQuery={searchQuery}
+        onSearchChange={(q) => {
+          setSearchQuery(q);
+          setPage(1);
+        }}
+        tag={tagQuery}
+        onTagChange={(t) => {
+          setTagQuery(t);
+          setPage(1);
+        }}
+        sortBy={sortBy}
+        onSortByChange={(sb) => {
+          setSortBy(sb);
+          setPage(1);
+        }}
+        sortDir={sortDir}
+        onSortDirToggle={() => setSortDir((prev) => (prev === "asc" ? "desc" : "asc"))}
+        category={category}
+        onCategoryChange={(cat) => {
+          setCategory(cat);
+          setPage(1);
+        }}
+        categories={categories}
+        lastSyncedAt={lastSyncedAt}
+        isSyncing={isSyncing}
+        onSync={handleSync}
+        onDisconnect={handleDisconnect}
+        disconnecting={disconnecting}
+      />
 
-        <div className="flex items-center gap-3 flex-wrap">
-          {/* Last Synced Badge */}
-          <div className="flex items-center gap-2 text-xs font-mono bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-lg text-slate-300">
-            <Clock className="w-3.5 h-3.5 text-slate-400" />
-            <span>Last synced: {formatTimestamp(lastSyncedAt)}</span>
-          </div>
-
-          <div className="hidden sm:flex items-center gap-2 text-xs font-mono bg-emerald-950/40 border border-emerald-500/20 px-3 py-1.5 rounded-lg text-emerald-400">
-            <CheckCircle2 className="w-3.5 h-3.5" />
-            <span>Connected</span>
-          </div>
-
-          <Button
-            onClick={handleSync}
-            disabled={isSyncing || disconnecting}
-            variant="default"
-            size="sm"
-            className="bg-blue-600 hover:bg-blue-500 text-white flex items-center gap-2 font-medium"
-          >
-            <RefreshCw className={`w-4 h-4 ${isSyncing ? "animate-spin" : ""}`} />
-            <span>{isSyncing ? "Syncing..." : "Sync now"}</span>
-          </Button>
-
-          <Button
-            onClick={handleDisconnect}
-            disabled={disconnecting || isSyncing}
-            variant="outline"
-            size="sm"
-            className="border-slate-800 hover:bg-slate-800 text-slate-300 hover:text-white flex items-center gap-2"
-          >
-            <LogOut className="w-4 h-4 text-red-400" />
-            <span>{disconnecting ? "Disconnecting..." : "Disconnect"}</span>
-          </Button>
-        </div>
-      </header>
-
-      {/* Main Content */}
-      <main className="flex-1 max-w-6xl w-full mx-auto p-6 md:p-10 space-y-6">
+      {/* Main Content Area */}
+      <main className="flex-1 max-w-6xl w-full mx-auto p-6 md:p-8 space-y-6">
         {/* Quota Exceeded Warning Banner */}
         {quotaError && (
           <div className="p-4 rounded-xl bg-amber-950/40 border border-amber-500/30 text-amber-200 flex items-start gap-3 shadow-lg">
@@ -176,69 +278,66 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
           </div>
         )}
 
-        <Card className="bg-slate-900/80 border-slate-800 text-slate-100 shadow-xl">
-          <CardHeader className="space-y-1">
-            <div className="flex items-center gap-2 text-emerald-400 text-xs font-semibold uppercase tracking-wider">
-              <CheckCircle2 className="w-4 h-4" />
-              <span>Google OAuth Session Active</span>
-            </div>
-            <CardTitle className="text-2xl font-bold text-white">Subscription Management Dashboard</CardTitle>
-            <CardDescription className="text-slate-400 text-sm">
-              {channelCount > 0
-                ? `${channelCount} channels stored in your local SQLite database.`
-                : "Your Google OAuth credentials are securely stored and encrypted locally. Click 'Sync now' to fetch your subscriptions."}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="pt-4">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-slate-200 font-semibold text-sm">
-                    <RefreshCw className="w-4 h-4 text-blue-400" />
-                    Subscription Sync
-                  </div>
-                  <span className="text-xs font-mono px-2 py-0.5 bg-blue-950/60 border border-blue-500/30 text-blue-300 rounded">
-                    {channelCount} channels
-                  </span>
-                </div>
-                <p className="text-xs text-slate-400">
-                  Paginates through YouTube subscriptions and upserts into local SQLite database safely.
-                </p>
-                <div className="pt-2">
-                  <Button
-                    onClick={handleSync}
-                    disabled={isSyncing || disconnecting}
-                    size="sm"
-                    className="w-full bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center gap-2"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? "animate-spin" : ""}`} />
-                    <span>{isSyncing ? "Syncing subscriptions..." : "Sync now"}</span>
-                  </Button>
-                </div>
+        {/* Channel Table & Controls */}
+        <div className="space-y-4">
+          <ChannelTable
+            channels={channels}
+            selectedChannelIds={selectedChannelIds}
+            onToggleSelectChannel={handleToggleSelectChannel}
+            onToggleSelectAll={handleToggleSelectAll}
+            isAllSelected={isAllSelected}
+            totalChannels={totalChannels}
+          />
+
+          {/* Pagination Controls */}
+          {totalChannels > 0 && (
+            <div className="flex items-center justify-between flex-wrap gap-4 px-2 py-2 text-xs text-slate-400 font-mono">
+              <div className="flex items-center gap-2">
+                <span>Show</span>
+                <select
+                  value={pageSize}
+                  onChange={(e) => {
+                    setPageSize(Number(e.target.value));
+                    setPage(1);
+                  }}
+                  className="bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 focus:outline-none"
+                >
+                  <option value={10}>10</option>
+                  <option value={20}>20</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+                <span>per page (Showing {channels.length} of {totalChannels})</span>
               </div>
 
-              <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-2">
-                <div className="flex items-center gap-2 text-slate-200 font-semibold text-sm">
-                  <Search className="w-4 h-4 text-amber-400" />
-                  Live Search &amp; Filter
-                </div>
-                <p className="text-xs text-slate-400">
-                  Instant search, category tagging, and subscriber count sorting ready to mount.
-                </p>
-              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={page <= 1 || isLoadingChannels}
+                  variant="outline"
+                  size="sm"
+                  className="border-slate-800 bg-slate-900 hover:bg-slate-800 text-slate-300 h-8 px-2.5"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </Button>
 
-              <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-2">
-                <div className="flex items-center gap-2 text-slate-200 font-semibold text-sm">
-                  <Layers className="w-4 h-4 text-purple-400" />
-                  Bulk Operations
-                </div>
-                <p className="text-xs text-slate-400">
-                  Bulk tag, categorise, or unsubscribe with quota-aware rate limits.
-                </p>
+                <span>
+                  Page {page} of {totalPages}
+                </span>
+
+                <Button
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={page >= totalPages || isLoadingChannels}
+                  variant="outline"
+                  size="sm"
+                  className="border-slate-800 bg-slate-900 hover:bg-slate-800 text-slate-300 h-8 px-2.5"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </Button>
               </div>
             </div>
-          </CardContent>
-        </Card>
+          )}
+        </div>
       </main>
     </div>
   );
