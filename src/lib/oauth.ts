@@ -1,13 +1,5 @@
 import { google } from "googleapis";
-import { encryptCredentials, decryptCredentials, deleteCredentials } from "./credentials";
-
-export interface AppCredentials {
-  clientId: string;
-  clientSecret: string;
-  accessToken?: string;
-  refreshToken?: string;
-  expiryDate?: number | null;
-}
+import { encryptCredentials, decryptCredentials, deleteCredentials, type AppCredentials } from "./credentials";
 
 export class AuthRevokedError extends Error {
   constructor(message = "Your Google access was revoked. Please reconnect.") {

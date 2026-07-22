@@ -1,9 +1,9 @@
-import { serve, type Server } from "bun";
+import { type Server } from "bun";
 import index from "./index.html";
 import { ensureAppDataDir } from "./lib/paths";
 import { decryptCredentials, encryptCredentials, deleteCredentials, type AppCredentials } from "./lib/credentials";
 import { openBrowser } from "./lib/browser";
-import { createOAuth2Client } from "./lib/oauth";
+import { createOAuth2Client, verifyOrRefreshTokens, AuthRevokedError } from "./lib/oauth";
 
 export interface ServerOptions {
   port?: number;
@@ -18,18 +18,35 @@ export function createAppServer(options: ServerOptions = {}): Server<unknown> {
   const hostname = options.hostname ?? "127.0.0.1";
   const port = options.port ?? 0;
 
-  const server = serve({
+  const server = Bun.serve({
     hostname,
     port,
     routes: {
       "/api/auth/status": {
         async GET() {
           const creds = decryptCredentials<AppCredentials>(appDataDir);
-          const isAuthenticated = Boolean(creds?.accessToken || creds?.refreshToken);
-          if (isAuthenticated) {
-            return Response.json({ authenticated: true });
+          const hasTokens = Boolean(creds?.accessToken || creds?.refreshToken);
+          if (!hasTokens) {
+            return Response.json({ authenticated: false, setupRequired: true });
           }
-          return Response.json({ authenticated: false, setupRequired: true });
+
+          try {
+            await verifyOrRefreshTokens(appDataDir);
+            return Response.json({ authenticated: true });
+          } catch (err: any) {
+            if (err instanceof AuthRevokedError) {
+              return Response.json(
+                {
+                  authenticated: false,
+                  setupRequired: true,
+                  reason: "auth_revoked",
+                  error: "Your Google access was revoked. Please reconnect.",
+                },
+                { status: 401 }
+              );
+            }
+            return Response.json({ authenticated: false, setupRequired: true });
+          }
         },
       },
 
@@ -58,8 +75,7 @@ export function createAppServer(options: ServerOptions = {}): Server<unknown> {
               appDataDir
             );
 
-            const serverPort = server.port;
-            const redirectUri = `http://127.0.0.1:${serverPort}/oauth/callback`;
+            const redirectUri = `http://127.0.0.1:${server.port}/oauth/callback`;
             const oauth2Client = createOAuth2Client(clientId, clientSecret, redirectUri);
 
             const authUrl = oauth2Client.generateAuthUrl({

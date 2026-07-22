@@ -16,17 +16,21 @@ export function App() {
   const checkAuth = () => {
     setLoading(true);
     fetch("/api/auth/status")
-      .then((res) => {
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 401 && data.reason === "auth_revoked") {
+          setUrlError("Your Google access was revoked. Please reconnect.");
+          setAuthStatus({ authenticated: false, setupRequired: true });
+          return;
+        }
         if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-        return res.json();
-      })
-      .then((data: AuthStatus) => {
         setAuthStatus(data);
-        setLoading(false);
       })
       .catch((err) => {
         console.error("Failed to check auth status:", err);
         setAuthStatus({ authenticated: false, setupRequired: true });
+      })
+      .finally(() => {
         setLoading(false);
       });
   };
