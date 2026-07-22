@@ -3,6 +3,7 @@ import type { ChannelRecord } from "@/lib/db";
 import { TopBar } from "./TopBar";
 import { ChannelTable } from "./ChannelTable";
 import { BulkActionBar } from "./BulkActionBar";
+import { UnsubscribeConfirmModal } from "./UnsubscribeConfirmModal";
 import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Layers } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -247,6 +248,59 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
     }
   };
 
+  // Unsubscribe Modal State
+  const [isUnsubscribeModalOpen, setIsUnsubscribeModalOpen] = useState(false);
+  const [isUnsubscribing, setIsUnsubscribing] = useState(false);
+
+  const handleBulkUnsubscribeConfirm = async () => {
+    if (selectedChannelIds.size === 0) return;
+
+    setIsUnsubscribing(true);
+    setQuotaError(null);
+    setSyncSuccessMessage(null);
+
+    try {
+      const res = await fetch("/api/channels/unsubscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channelIds: Array.from(selectedChannelIds) }),
+      });
+
+      if (res.status === 401) {
+        onDisconnect();
+        return;
+      }
+
+      if (res.ok) {
+        const data = await res.json();
+        const succeededCount = data.succeeded?.length || 0;
+        const quotaStopped = Boolean(data.quotaStopped);
+
+        if (quotaStopped) {
+          const remainingCount = selectedChannelIds.size - succeededCount;
+          setQuotaError({
+            message: `YouTube API quota limit reached. Unsubscribed ${succeededCount} channel${
+              succeededCount === 1 ? "" : "s"
+            }. ${remainingCount} channel${remainingCount === 1 ? "" : "s"} could not be unsubscribed today.`,
+            count: succeededCount,
+          });
+        } else if (succeededCount > 0) {
+          setSyncSuccessMessage(`Successfully unsubscribed from ${succeededCount} channel${succeededCount === 1 ? "" : "s"}.`);
+        }
+
+        setSelectedChannelIds(new Set());
+        setIsUnsubscribeModalOpen(false);
+        await fetchCategories();
+        await fetchChannels();
+      }
+    } catch (err) {
+      console.error("Bulk unsubscribe failed:", err);
+    } finally {
+      setIsUnsubscribing(false);
+    }
+  };
+
+  const selectedChannelsList = channels.filter((c) => selectedChannelIds.has(c.channel_id));
   const isAllSelected = totalChannels > 0 && selectedChannelIds.size === totalChannels;
   const totalPages = Math.ceil(totalChannels / pageSize) || 1;
 
@@ -293,8 +347,7 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
             <div className="space-y-1 text-sm">
               <h4 className="font-semibold text-amber-300">YouTube API Quota Reached</h4>
               <p className="text-slate-300 text-xs leading-relaxed">
-                {quotaError.message} Sync stopped after fetching {quotaError.count} channel
-                {quotaError.count === 1 ? "" : "s"}. You can retry syncing tomorrow when Google resets daily quota.
+                {quotaError.message} You can retry tomorrow when Google resets daily quota (~10,000 quota units / ~200 deletes per day).
               </p>
             </div>
           </div>
@@ -375,7 +428,18 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
         selectedCount={selectedChannelIds.size}
         categories={categories}
         onApply={handleBulkTagCategory}
+        onUnsubscribe={() => setIsUnsubscribeModalOpen(true)}
         onClearSelection={() => setSelectedChannelIds(new Set())}
+      />
+
+      {/* Unsubscribe Confirmation Modal */}
+      <UnsubscribeConfirmModal
+        isOpen={isUnsubscribeModalOpen}
+        selectedChannels={selectedChannelsList}
+        totalSelectedCount={selectedChannelIds.size}
+        onConfirm={handleBulkUnsubscribeConfirm}
+        onCancel={() => setIsUnsubscribeModalOpen(false)}
+        isUnsubscribing={isUnsubscribing}
       />
     </div>
   );

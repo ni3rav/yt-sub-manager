@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
-import { initDatabase, upsertChannels, getChannels, getDistinctCategories, getAllMatchingChannelIds, bulkTagAndCategory, type ChannelRecord } from "../src/lib/db";
+import { initDatabase, upsertChannels, getChannels, getDistinctCategories, getAllMatchingChannelIds, bulkTagAndCategory, getSubscriptionIds, deleteChannels, type ChannelRecord } from "../src/lib/db";
 
 describe("SQLite Channels Query Seam", () => {
   let db: Database;
@@ -148,5 +148,23 @@ describe("SQLite Channels Query Seam", () => {
     expect(uc1.category).toBe("Science");
     expect(JSON.parse(uc1.tags)).toEqual(["coding", "javascript", "physics"]);
   });
+
+  test("getSubscriptionIds returns mapping of channel_id to subscription_id", () => {
+    const subs = getSubscriptionIds(db, ["UC1", "UC3", "UC99"]);
+    expect(subs).toEqual([
+      { channel_id: "UC1", subscription_id: "sub1" },
+      { channel_id: "UC3", subscription_id: "sub3" },
+    ]);
+  });
+
+  test("deleteChannels removes rows from database", () => {
+    const deleted = deleteChannels(db, ["UC1", "UC2"]);
+    expect(deleted).toBe(2);
+
+    const remaining = getChannels(db, { page: 1, pageSize: 10 });
+    expect(remaining.total).toBe(1);
+    expect(remaining.channels[0].channel_id).toBe("UC3");
+  });
 });
+
 

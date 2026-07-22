@@ -5,8 +5,8 @@ import { ensureAppDataDir } from "./lib/paths";
 import { decryptCredentials, encryptCredentials, deleteCredentials, type AppCredentials } from "./lib/credentials";
 import { openBrowser } from "./lib/browser";
 import { createOAuth2Client, getStoredOAuth2Client, verifyOrRefreshTokens, AuthRevokedError } from "./lib/oauth";
-import { initDatabase, upsertChannels, getChannelsStats, getChannels, getAllMatchingChannelIds, getDistinctCategories, bulkTagAndCategory, InvalidSortError } from "./lib/db";
-import { fetchAllSubscriptions, createYouTubeClient, QuotaExceededError } from "./lib/youtube";
+import { initDatabase, upsertChannels, getChannelsStats, getChannels, getAllMatchingChannelIds, getDistinctCategories, bulkTagAndCategory, getSubscriptionIds, deleteChannels, InvalidSortError } from "./lib/db";
+import { fetchAllSubscriptions, createYouTubeClient, QuotaExceededError, isQuotaExceededError } from "./lib/youtube";
 
 export interface ServerOptions {
   port?: number;
@@ -285,6 +285,78 @@ export function createAppServer(options: ServerOptions = {}): Server<unknown> {
             return Response.json({ updatedCount });
           } catch (err: any) {
             return Response.json({ error: err?.message || "Failed to update channels." }, { status: 500 });
+          }
+        },
+      },
+
+      "/api/channels/unsubscribe": {
+        async POST(req) {
+          const authErr = await authenticateRequest(appDataDir);
+          if (authErr) return authErr;
+
+          try {
+            const body = await req.json().catch(() => null);
+            if (!body || !Array.isArray(body.channelIds) || body.channelIds.length === 0) {
+              return Response.json({ error: "channelIds must be a non-empty array." }, { status: 400 });
+            }
+
+            const channelIds: string[] = body.channelIds;
+            const subRecords = getSubscriptionIds(db, channelIds);
+            const subMap = new Map(subRecords.map((r) => [r.channel_id, r.subscription_id]));
+
+            let ytClient = options.youtubeClient;
+            if (!ytClient) {
+              const redirectUri = `http://127.0.0.1:${server.port}/oauth/callback`;
+              const oauth2Client = getStoredOAuth2Client(appDataDir, redirectUri);
+              if (!oauth2Client) {
+                return Response.json({ error: "OAuth client not initialized." }, { status: 401 });
+              }
+              ytClient = createYouTubeClient(oauth2Client);
+            }
+
+            const succeeded: string[] = [];
+            const failed: { channelId: string; reason: string }[] = [];
+            let quotaStopped = false;
+
+            const interCallDelayMs = typeof body.interCallDelayMs === "number" ? body.interCallDelayMs : 250;
+
+            for (let i = 0; i < channelIds.length; i++) {
+              const channelId = channelIds[i];
+              const subscriptionId = subMap.get(channelId);
+
+              if (!subscriptionId) {
+                failed.push({ channelId, reason: "Subscription ID not found" });
+                continue;
+              }
+
+              if (i > 0 && interCallDelayMs > 0) {
+                await Bun.sleep(interCallDelayMs);
+              }
+
+              try {
+                await ytClient.subscriptions.delete({ id: subscriptionId });
+                succeeded.push(channelId);
+              } catch (err: any) {
+                if (isQuotaExceededError(err)) {
+                  quotaStopped = true;
+                  break;
+                } else {
+                  failed.push({ channelId, reason: err?.message || "Failed to unsubscribe" });
+                }
+              }
+            }
+
+            if (succeeded.length > 0) {
+              deleteChannels(db, succeeded);
+            }
+
+            return Response.json({
+              succeeded,
+              failed,
+              quotaStopped,
+            });
+          } catch (err: any) {
+            return Response.json({ error: err?.message || "Failed to unsubscribe channels." }, { status: 500 });
           }
         },
       },

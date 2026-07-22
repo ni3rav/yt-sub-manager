@@ -299,3 +299,29 @@ export function bulkTagAndCategory(
   return updatedCount;
 }
 
+export function getSubscriptionIds(
+  db: Database,
+  channelIds: string[]
+): { channel_id: string; subscription_id: string }[] {
+  if (!channelIds || channelIds.length === 0) return [];
+  const stmt = db.prepare(
+    `SELECT channel_id, subscription_id FROM channels WHERE channel_id IN (${channelIds.map(() => "?").join(",")})`
+  );
+  return stmt.all(...channelIds) as { channel_id: string; subscription_id: string }[];
+}
+
+export function deleteChannels(db: Database, channelIds: string[]): number {
+  if (!channelIds || channelIds.length === 0) return 0;
+  const stmt = db.prepare("DELETE FROM channels WHERE channel_id = ?");
+  let deletedCount = 0;
+  const transaction = db.transaction((ids: string[]) => {
+    for (const id of ids) {
+      const res = stmt.run(id);
+      deletedCount += res.changes;
+    }
+  });
+  transaction(channelIds);
+  return deletedCount;
+}
+
+

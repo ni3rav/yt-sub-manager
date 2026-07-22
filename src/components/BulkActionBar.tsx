@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Tag, FolderPlus, X, Check, Loader2 } from "lucide-react";
+import { Tag, FolderPlus, X, Check, Loader2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -7,6 +7,7 @@ interface BulkActionBarProps {
   selectedCount: number;
   categories: string[];
   onApply: (category?: string, tags?: string[]) => Promise<void>;
+  onUnsubscribe: () => void;
   onClearSelection: () => void;
 }
 
@@ -14,6 +15,7 @@ export function BulkActionBar({
   selectedCount,
   categories,
   onApply,
+  onUnsubscribe,
   onClearSelection,
 }: BulkActionBarProps) {
   const [selectedCategory, setSelectedCategory] = useState<string>("");
@@ -177,20 +179,30 @@ export function BulkActionBar({
           </div>
         </div>
 
-        {/* Submit Action */}
+        {/* Submit Actions */}
         <div className="flex items-center gap-2">
           <Button
             onClick={handleApply}
             disabled={!canApply}
             size="sm"
-            className="bg-red-600 hover:bg-red-500 text-white font-medium text-xs px-4 h-9 shadow-lg shadow-red-600/20 disabled:opacity-50"
+            className="bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-medium text-xs px-3.5 h-9 disabled:opacity-50"
           >
             {isSubmitting ? (
               <Loader2 className="w-4 h-4 animate-spin mr-1.5" />
             ) : (
-              <Check className="w-4 h-4 mr-1.5" />
+              <Check className="w-4 h-4 mr-1.5 text-emerald-400" />
             )}
             Apply Changes
+          </Button>
+
+          <Button
+            onClick={onUnsubscribe}
+            disabled={isSubmitting}
+            size="sm"
+            className="bg-red-600 hover:bg-red-500 text-white font-medium text-xs px-3.5 h-9 shadow-lg shadow-red-600/20 disabled:opacity-50"
+          >
+            <Trash2 className="w-4 h-4 mr-1.5" />
+            Unsubscribe Selected
           </Button>
         </div>
       </div>
