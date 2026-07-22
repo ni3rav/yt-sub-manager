@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import type { ChannelRecord } from "@/lib/db";
 import { TopBar } from "./TopBar";
 import { ChannelTable } from "./ChannelTable";
+import { BulkActionBar } from "./BulkActionBar";
 import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Layers } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -217,6 +218,35 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
     }
   };
 
+  const handleBulkTagCategory = async (categoryToApply?: string, tagsToApply?: string[]) => {
+    if (selectedChannelIds.size === 0) return;
+
+    try {
+      const res = await fetch("/api/channels/tag", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channelIds: Array.from(selectedChannelIds),
+          category: categoryToApply,
+          tags: tagsToApply,
+        }),
+      });
+
+      if (res.status === 401) {
+        onDisconnect();
+        return;
+      }
+
+      if (res.ok) {
+        setSelectedChannelIds(new Set());
+        await fetchCategories();
+        await fetchChannels();
+      }
+    } catch (err) {
+      console.error("Bulk tag/category error:", err);
+    }
+  };
+
   const isAllSelected = totalChannels > 0 && selectedChannelIds.size === totalChannels;
   const totalPages = Math.ceil(totalChannels / pageSize) || 1;
 
@@ -255,7 +285,7 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
       />
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-6xl w-full mx-auto p-6 md:p-8 space-y-6">
+      <main className="flex-1 max-w-6xl w-full mx-auto p-6 md:p-8 space-y-6 pb-28">
         {/* Quota Exceeded Warning Banner */}
         {quotaError && (
           <div className="p-4 rounded-xl bg-amber-950/40 border border-amber-500/30 text-amber-200 flex items-start gap-3 shadow-lg">
@@ -339,6 +369,14 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
           )}
         </div>
       </main>
+
+      {/* Floating Bulk Action Bar */}
+      <BulkActionBar
+        selectedCount={selectedChannelIds.size}
+        categories={categories}
+        onApply={handleBulkTagCategory}
+        onClearSelection={() => setSelectedChannelIds(new Set())}
+      />
     </div>
   );
 }

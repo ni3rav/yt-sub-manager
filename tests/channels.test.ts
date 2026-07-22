@@ -164,4 +164,84 @@ describe("GET /api/channels HTTP API Seam", () => {
     const body = await res.json();
     expect(body.categories).toEqual(["Gaming", "Technology"]);
   });
+
+  describe("POST /api/channels/tag", () => {
+    test("returns 401 if unauthenticated", async () => {
+      const unauthDir = fs.mkdtempSync(path.join(os.tmpdir(), "yt-unauth-tag-"));
+      const unauthServer = createAppServer({
+        port: 0,
+        appDataDir: unauthDir,
+        autoOpenBrowser: false,
+      });
+
+      const res = await fetch(`http://127.0.0.1:${unauthServer.port}/api/channels/tag`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channelIds: ["UC1"], category: "Education" }),
+      });
+      expect(res.status).toBe(401);
+      unauthServer.stop(true);
+      fs.rmSync(unauthDir, { recursive: true, force: true });
+    });
+
+    test("returns 400 if both category and tags are absent", async () => {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/channels/tag`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channelIds: ["UC1"] }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBeDefined();
+
+      const resEmptyTags = await fetch(`http://127.0.0.1:${server.port}/api/channels/tag`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channelIds: ["UC1"], tags: ["", "   "] }),
+      });
+      expect(resEmptyTags.status).toBe(400);
+    });
+
+    test("returns 400 if channelIds is missing or invalid", async () => {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/channels/tag`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ category: "Education" }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    test("bulk updates category across specified channels over HTTP", async () => {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/channels/tag`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channelIds: ["UC1", "UC3"], category: "Dev" }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.updatedCount).toBe(2);
+
+      const resGet = await fetch(`http://127.0.0.1:${server.port}/api/channels?category=Dev`);
+      const getBody = await resGet.json();
+      expect(getBody.total).toBe(2);
+      expect(getBody.channels.map((c: any) => c.title)).toEqual(["Alpha Tech", "Gamma Tech"]);
+    });
+
+    test("bulk merges tags without duplicating existing ones over HTTP", async () => {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/channels/tag`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channelIds: ["UC1"], tags: ["coding", "react"] }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.updatedCount).toBe(1);
+
+      const resGet = await fetch(`http://127.0.0.1:${server.port}/api/channels?q=Alpha`);
+      const getBody = await resGet.json();
+      const channel = getBody.channels[0];
+      expect(JSON.parse(channel.tags)).toEqual(["coding", "javascript", "react"]);
+    });
+  });
 });
+

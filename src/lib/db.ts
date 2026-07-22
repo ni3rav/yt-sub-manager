@@ -235,3 +235,67 @@ export function getChannelsStats(db: Database): { totalCount: number; lastSynced
     lastSyncedAt: lastSyncRow?.last_synced_at ?? null,
   };
 }
+
+export interface BulkTagCategoryOptions {
+  category?: string;
+  tags?: string[];
+}
+
+export function bulkTagAndCategory(
+  db: Database,
+  channelIds: string[],
+  options: BulkTagCategoryOptions
+): number {
+  if (!channelIds || channelIds.length === 0) return 0;
+  if (options.category === undefined && (!options.tags || options.tags.length === 0)) return 0;
+
+  const updateCategoryStmt = db.prepare("UPDATE channels SET category = ? WHERE channel_id = ?");
+  const getTagsStmt = db.prepare("SELECT tags FROM channels WHERE channel_id = ?");
+  const updateTagsStmt = db.prepare("UPDATE channels SET tags = ? WHERE channel_id = ?");
+
+  let updatedCount = 0;
+
+  const transaction = db.transaction((ids: string[]) => {
+    for (const id of ids) {
+      let rowUpdated = false;
+
+      if (options.category !== undefined) {
+        const res = updateCategoryStmt.run(options.category, id);
+        if (res.changes > 0) rowUpdated = true;
+      }
+
+      if (options.tags && options.tags.length > 0) {
+        const row = getTagsStmt.get(id) as { tags: string } | undefined;
+        if (row) {
+          let existingTags: string[] = [];
+          try {
+            existingTags = JSON.parse(row.tags || "[]");
+            if (!Array.isArray(existingTags)) existingTags = [];
+          } catch {
+            existingTags = [];
+          }
+
+          const newTags = options.tags.filter((t) => typeof t === "string" && t.trim() !== "");
+          const merged = [...existingTags];
+          for (const nt of newTags) {
+            const trimmed = nt.trim();
+            if (!merged.includes(trimmed)) {
+              merged.push(trimmed);
+            }
+          }
+
+          const res = updateTagsStmt.run(JSON.stringify(merged), id);
+          if (res.changes > 0) rowUpdated = true;
+        }
+      }
+
+      if (rowUpdated) {
+        updatedCount++;
+      }
+    }
+  });
+
+  transaction(channelIds);
+  return updatedCount;
+}
+

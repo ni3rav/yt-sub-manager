@@ -5,7 +5,7 @@ import { ensureAppDataDir } from "./lib/paths";
 import { decryptCredentials, encryptCredentials, deleteCredentials, type AppCredentials } from "./lib/credentials";
 import { openBrowser } from "./lib/browser";
 import { createOAuth2Client, getStoredOAuth2Client, verifyOrRefreshTokens, AuthRevokedError } from "./lib/oauth";
-import { initDatabase, upsertChannels, getChannelsStats, getChannels, getAllMatchingChannelIds, getDistinctCategories, InvalidSortError } from "./lib/db";
+import { initDatabase, upsertChannels, getChannelsStats, getChannels, getAllMatchingChannelIds, getDistinctCategories, bulkTagAndCategory, InvalidSortError } from "./lib/db";
 import { fetchAllSubscriptions, createYouTubeClient, QuotaExceededError } from "./lib/youtube";
 
 export interface ServerOptions {
@@ -249,6 +249,42 @@ export function createAppServer(options: ServerOptions = {}): Server<unknown> {
               return Response.json({ error: err.message }, { status: 400 });
             }
             return Response.json({ error: err?.message || "Failed to fetch channels." }, { status: 500 });
+          }
+        },
+      },
+
+      "/api/channels/tag": {
+        async POST(req) {
+          const authErr = await authenticateRequest(appDataDir);
+          if (authErr) return authErr;
+
+          try {
+            const body = await req.json().catch(() => null);
+            if (!body || !Array.isArray(body.channelIds) || body.channelIds.length === 0) {
+              return Response.json({ error: "channelIds must be a non-empty array." }, { status: 400 });
+            }
+
+            const hasCategory = typeof body.category === "string";
+            const validTags = Array.isArray(body.tags)
+              ? body.tags.map((t: any) => (typeof t === "string" ? t.trim() : "")).filter((t: string) => t !== "")
+              : [];
+            const hasTags = validTags.length > 0;
+
+            if (!hasCategory && !hasTags) {
+              return Response.json(
+                { error: "At least one of 'category' or 'tags' must be provided." },
+                { status: 400 }
+              );
+            }
+
+            const updatedCount = bulkTagAndCategory(db, body.channelIds, {
+              category: hasCategory ? body.category : undefined,
+              tags: hasTags ? validTags : undefined,
+            });
+
+            return Response.json({ updatedCount });
+          } catch (err: any) {
+            return Response.json({ error: err?.message || "Failed to update channels." }, { status: 500 });
           }
         },
       },

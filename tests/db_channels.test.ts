@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
-import { initDatabase, upsertChannels, getChannels, getDistinctCategories, getAllMatchingChannelIds, type ChannelRecord } from "../src/lib/db";
+import { initDatabase, upsertChannels, getChannels, getDistinctCategories, getAllMatchingChannelIds, bulkTagAndCategory, type ChannelRecord } from "../src/lib/db";
 
 describe("SQLite Channels Query Seam", () => {
   let db: Database;
@@ -113,4 +113,40 @@ describe("SQLite Channels Query Seam", () => {
     const categories = getDistinctCategories(db);
     expect(categories).toEqual(["Gaming", "Technology"]);
   });
+
+  test("bulkTagAndCategory overwrites category on specified channels", () => {
+    const updated = bulkTagAndCategory(db, ["UC1", "UC2"], { category: "Education" });
+    expect(updated).toBe(2);
+
+    const uc1 = getChannels(db, { q: "Alpha Tech" }).channels[0];
+    const uc2 = getChannels(db, { q: "Beta Gaming" }).channels[0];
+    const uc3 = getChannels(db, { q: "Gamma Tech" }).channels[0];
+
+    expect(uc1.category).toBe("Education");
+    expect(uc2.category).toBe("Education");
+    expect(uc3.category).toBe("Technology"); // unchanged
+  });
+
+  test("bulkTagAndCategory merges tags without duplicating existing ones", () => {
+    // UC1 initially has tags ["coding", "javascript"]
+    // UC2 initially has tags ["gaming", "walkthrough"]
+    const updated = bulkTagAndCategory(db, ["UC1", "UC2"], { tags: ["coding", "tutorial"] });
+    expect(updated).toBe(2);
+
+    const uc1 = getChannels(db, { q: "Alpha Tech" }).channels[0];
+    const uc2 = getChannels(db, { q: "Beta Gaming" }).channels[0];
+
+    expect(JSON.parse(uc1.tags)).toEqual(["coding", "javascript", "tutorial"]);
+    expect(JSON.parse(uc2.tags)).toEqual(["gaming", "walkthrough", "coding", "tutorial"]);
+  });
+
+  test("bulkTagAndCategory supports combined category overwrite and tag merge", () => {
+    const updated = bulkTagAndCategory(db, ["UC1"], { category: "Science", tags: ["physics"] });
+    expect(updated).toBe(1);
+
+    const uc1 = getChannels(db, { q: "Alpha Tech" }).channels[0];
+    expect(uc1.category).toBe("Science");
+    expect(JSON.parse(uc1.tags)).toEqual(["coding", "javascript", "physics"]);
+  });
 });
+
