@@ -18,6 +18,26 @@ async function readNdjsonDone(res: Response): Promise<any> {
   return done;
 }
 
+async function waitForCompletedJob(baseUrl: string, id: string): Promise<any> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const { job } = await fetch(`${baseUrl}/api/unsubscribe/jobs/${id}`).then((r) => r.json());
+    if (job.status === "completed") return job;
+    await Bun.sleep(1);
+  }
+  throw new Error(`Timed out waiting for unsubscribe job ${id}`);
+}
+
+async function enqueueAndWait(baseUrl: string, channelIds: string[]): Promise<any> {
+  const res = await fetch(`${baseUrl}/api/channels/unsubscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ channelIds, interCallDelayMs: 0, retryBaseDelayMs: 0 }),
+  });
+  const { job } = await res.json();
+  return waitForCompletedJob(baseUrl, job.id);
+}
+
 describe("Actions log & redo", () => {
   let tempDir: string;
   let server: any;
@@ -100,11 +120,7 @@ describe("Actions log & redo", () => {
   });
 
   test("unsubscribe batches are recorded in the actions log with a title snapshot", async () => {
-    await fetch(`${baseUrl}/api/channels/unsubscribe`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channelIds: ["UC1", "UC2"], interCallDelayMs: 0 }),
-    }).then((r) => r.text());
+    await enqueueAndWait(baseUrl, ["UC1", "UC2"]);
 
     const res = await fetch(`${baseUrl}/api/actions`);
     expect(res.status).toBe(200);
@@ -148,13 +164,9 @@ describe("Actions log & redo", () => {
       return { status: 204 };
     };
 
-    const firstDone = await fetch(`${baseUrl}/api/channels/unsubscribe`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channelIds: ["UC1", "UC2"], interCallDelayMs: 0 }),
-    }).then(readNdjsonDone);
-    expect(firstDone.succeeded).toEqual(["UC1"]);
-    expect(firstDone.failed).toHaveLength(1);
+    const firstJob = await enqueueAndWait(baseUrl, ["UC1", "UC2"]);
+    expect(firstJob.succeeded).toEqual(["UC1"]);
+    expect(firstJob.failed).toHaveLength(1);
 
     const actionsBody = await fetch(`${baseUrl}/api/actions`).then((r) => r.json());
     const originalAction = actionsBody.actions[0];
@@ -171,13 +183,12 @@ describe("Actions log & redo", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ interCallDelayMs: 0 }),
     });
-    expect(redoRes.status).toBe(200);
-    expect(redoRes.headers.get("Content-Type")).toContain("application/x-ndjson");
-
-    const redoDone = await readNdjsonDone(redoRes);
+    expect(redoRes.status).toBe(202);
+    const { job: queuedRedo } = await redoRes.json();
+    const redoDone = await waitForCompletedJob(baseUrl, queuedRedo.id);
     // UC1 is already gone locally -> skipped; only UC2 re-attempted
     expect(redoDone.succeeded).toEqual(["UC2"]);
-    expect(redoDone.skipped).toEqual(["UC1"]);
+    expect(redoDone.skippedCount).toBe(1);
     expect(redoDone.failed).toEqual([]);
 
     // UC2 removed from DB now

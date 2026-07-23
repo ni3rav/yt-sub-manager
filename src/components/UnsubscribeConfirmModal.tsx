@@ -12,6 +12,8 @@ interface UnsubscribeConfirmModalProps {
   onCancel: () => void;
   isUnsubscribing: boolean;
   progress: UnsubscribeProgress | null;
+  waitReason?: "pacing" | "rate_limit" | "daily_quota" | "authentication" | null;
+  nextAttemptAt?: string | null;
 }
 
 export function UnsubscribeConfirmModal({
@@ -23,6 +25,8 @@ export function UnsubscribeConfirmModal({
   onCancel,
   isUnsubscribing,
   progress,
+  waitReason,
+  nextAttemptAt,
 }: UnsubscribeConfirmModalProps) {
   if (!isOpen) return null;
 
@@ -51,11 +55,9 @@ export function UnsubscribeConfirmModal({
               </p>
             </div>
           </div>
-          {!isUnsubscribing && (
-            <Button onClick={onCancel} variant="ghost" size="icon-sm" aria-label="Close">
-              <X />
-            </Button>
-          )}
+          <Button onClick={onCancel} variant="ghost" size="icon-sm" aria-label="Close">
+            <X />
+          </Button>
         </div>
 
         {/* Warning Banner */}
@@ -91,9 +93,17 @@ export function UnsubscribeConfirmModal({
         {isUnsubscribing ? (
           <div className="space-y-3 py-2">
             <div className="flex items-center justify-center gap-2 text-sm font-medium">
-              <Loader2 className="size-4 animate-spin text-muted-foreground" />
+              {waitReason === "daily_quota" ? (
+                <AlertTriangle className="size-4 text-destructive" />
+              ) : (
+                <Loader2 className="size-4 animate-spin text-muted-foreground" />
+              )}
               <span>
-                Unsubscribed {progress?.processed ?? 0} of {progress?.total ?? count}
+                {waitReason === "daily_quota"
+                  ? "Daily quota reached — queued for automatic resume"
+                  : waitReason === "rate_limit"
+                    ? "YouTube rate limited this job — backing off"
+                    : `Unsubscribed ${progress?.processed ?? 0} of ${progress?.total ?? count}`}
               </span>
             </div>
             <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
@@ -103,8 +113,15 @@ export function UnsubscribeConfirmModal({
               />
             </div>
             <p className="text-center text-sm text-muted-foreground">
-              Requests are sent one at a time to respect YouTube API limits. Keep this window open.
+              {waitReason === "daily_quota" && nextAttemptAt
+                ? `The worker will resume after YouTube's quota reset (${new Date(nextAttemptAt).toLocaleString()}).`
+                : "Requests are queued and sent one at a time with automatic rate-limit backoff."}
             </p>
+            <div className="flex justify-center">
+              <Button onClick={onCancel} variant="outline" size="sm">
+                Continue in background
+              </Button>
+            </div>
           </div>
         ) : (
           <div className="flex items-center justify-end gap-3 pt-2">

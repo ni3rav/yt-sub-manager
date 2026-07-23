@@ -10,8 +10,14 @@ import { ActivityTab } from "./ActivityTab";
 import { ExportControls } from "./ExportControls";
 import { UnsubscribeConfirmModal } from "./UnsubscribeConfirmModal";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { readActionStream, type StreamProgress, type StreamSummary } from "@/lib/actionStream";
-import { fetchJson, postJson, categoriesQueryOptions, syncStatusQueryOptions, UnauthorizedError } from "@/lib/api";
+import {
+  fetchJson,
+  postJson,
+  categoriesQueryOptions,
+  syncStatusQueryOptions,
+  UnauthorizedError,
+  type UnsubscribeJob,
+} from "@/lib/api";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -28,7 +34,10 @@ interface DashboardProps {
   onDisconnect: () => void;
 }
 
-export type UnsubscribeProgress = StreamProgress;
+export interface UnsubscribeProgress {
+  processed: number;
+  total: number;
+}
 
 interface UnsubscribeTarget {
   channelIds: string[];
@@ -128,6 +137,7 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
     queryClient.invalidateQueries({ queryKey: ["channels"] });
     queryClient.invalidateQueries({ queryKey: ["categories"] });
     queryClient.invalidateQueries({ queryKey: ["actions"] });
+    queryClient.invalidateQueries({ queryKey: ["unsubscribeJobs"] });
   };
 
   // Mutations
@@ -229,56 +239,49 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
 
   // Unsubscribe State (driven by a target: current selection or a whole category)
   const [unsubscribeTarget, setUnsubscribeTarget] = useState<UnsubscribeTarget | null>(null);
-  const [unsubscribeProgress, setUnsubscribeProgress] = useState<StreamProgress | null>(null);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
 
   const unsubscribeMutation = useMutation({
-    mutationFn: async (channelIds: string[]): Promise<StreamSummary> => {
-      const res = await fetch("/api/channels/unsubscribe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channelIds }),
-      });
-      if (res.status === 401) throw new UnauthorizedError();
-      return readActionStream(res, setUnsubscribeProgress);
-    },
-    onMutate: (channelIds) => {
+    mutationFn: (channelIds: string[]) =>
+      postJson<{ job: UnsubscribeJob }>("/api/channels/unsubscribe", { channelIds }),
+    onMutate: () => {
       clearBanners();
-      setUnsubscribeProgress({ processed: 0, total: channelIds.length });
     },
-    onSuccess: ({ succeeded, failed, quotaStopped }, channelIds) => {
-      if (quotaStopped) {
-        const remaining = channelIds.length - succeeded.length - failed.length;
-        setQuotaError({
-          message: `YouTube API quota limit reached. Unsubscribed ${succeeded.length} channel${
-            succeeded.length === 1 ? "" : "s"
-          }; ${remaining} channel${remaining === 1 ? "" : "s"} not attempted. You can redo this action from the Activity tab tomorrow.`,
-          count: succeeded.length,
-        });
-      } else if (failed.length > 0) {
-        const firstReason = failed[0]?.reason ? ` First error: ${failed[0].reason}` : "";
-        setActionError(
-          `${failed.length} channel${failed.length === 1 ? "" : "s"} could not be unsubscribed (${succeeded.length} succeeded).${firstReason} You can redo this action from the Activity tab.`
-        );
-      } else if (succeeded.length > 0) {
-        setSuccessMessage(`Successfully unsubscribed from ${succeeded.length} channel${succeeded.length === 1 ? "" : "s"}.`);
-      }
-    },
+    onSuccess: ({ job }) => setActiveJobId(job.id),
     onError: (err) => {
       if (err instanceof UnauthorizedError) return;
-      console.error("Bulk unsubscribe failed:", err);
-      setActionError(
-        `${err.message || "Bulk unsubscribe failed."} Progress up to the interruption was saved; check the Activity tab to redo the remainder.`
-      );
-    },
-    onSettled: () => {
-      setUnsubscribeProgress(null);
-      setUnsubscribeTarget(null);
-      setSelectedChannelIds(new Set());
-      // Always refresh: the server removes rows as it goes, so even an
-      // interrupted batch changed local state.
-      invalidateChannelData();
+      console.error("Failed to enqueue bulk unsubscribe:", err);
+      setActionError(err.message || "Failed to queue the unsubscribe operation.");
     },
   });
+
+  const activeJobQuery = useQuery({
+    queryKey: ["unsubscribeJob", activeJobId],
+    queryFn: () => fetchJson<{ job: UnsubscribeJob }>(`/api/unsubscribe/jobs/${activeJobId}`),
+    enabled: activeJobId !== null,
+    refetchInterval: (query) => (query.state.data?.job.status === "completed" ? false : 500),
+  });
+  const activeJob = activeJobQuery.data?.job ?? null;
+
+  useEffect(() => {
+    if (!activeJob || activeJob.status !== "completed") return;
+
+    if (activeJob.failed.length > 0) {
+      const firstReason = activeJob.failed[0]?.reason ? ` First error: ${activeJob.failed[0].reason}` : "";
+      setActionError(
+        `${activeJob.failed.length} channel${activeJob.failed.length === 1 ? "" : "s"} could not be unsubscribed (${activeJob.succeededCount} succeeded).${firstReason} You can redo this action from the Activity tab.`
+      );
+    } else if (activeJob.succeededCount > 0) {
+      setSuccessMessage(
+        `Successfully unsubscribed from ${activeJob.succeededCount} channel${activeJob.succeededCount === 1 ? "" : "s"}.`
+      );
+    }
+
+    setActiveJobId(null);
+    setUnsubscribeTarget(null);
+    setSelectedChannelIds(new Set());
+    invalidateChannelData();
+  }, [activeJob?.id, activeJob?.status]);
 
   const handleOpenSelectionUnsubscribe = () => {
     const preview = channels
@@ -520,10 +523,23 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
         targetLabel={unsubscribeTarget?.label}
         onConfirm={handleUnsubscribeConfirm}
         onCancel={() => {
-          if (!unsubscribeMutation.isPending) setUnsubscribeTarget(null);
+          // The durable worker continues even when the modal is dismissed.
+          setUnsubscribeTarget(null);
+          setActiveJobId(null);
+          queryClient.invalidateQueries({ queryKey: ["unsubscribeJobs"] });
         }}
-        isUnsubscribing={unsubscribeMutation.isPending}
-        progress={unsubscribeProgress}
+        isUnsubscribing={
+          unsubscribeMutation.isPending || (activeJob !== null && activeJob.status !== "completed")
+        }
+        progress={
+          activeJob
+            ? { processed: activeJob.processed, total: activeJob.total }
+            : unsubscribeMutation.isPending && unsubscribeTarget
+              ? { processed: 0, total: unsubscribeTarget.channelIds.length }
+              : null
+        }
+        waitReason={activeJob?.waitReason ?? null}
+        nextAttemptAt={activeJob?.nextAttemptAt ?? null}
       />
     </div>
   );

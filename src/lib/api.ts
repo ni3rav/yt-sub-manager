@@ -57,6 +57,24 @@ export interface SyncStatusResponse {
   lastSyncedAt: string | null;
 }
 
+export interface UnsubscribeJob {
+  id: string;
+  status: "queued" | "running" | "waiting" | "completed";
+  total: number;
+  processed: number;
+  succeededCount: number;
+  failedCount: number;
+  skippedCount: number;
+  pendingCount: number;
+  waitReason: "pacing" | "rate_limit" | "daily_quota" | "authentication" | null;
+  nextAttemptAt: string | null;
+  actionId: number | null;
+  createdAt: string;
+  updatedAt: string;
+  succeeded: string[];
+  failed: { channelId: string; reason: string }[];
+}
+
 export const syncStatusQueryOptions = queryOptions({
   queryKey: ["syncStatus"],
   queryFn: () => fetchJson<SyncStatusResponse>("/api/sync"),
