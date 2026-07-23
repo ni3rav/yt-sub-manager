@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ChannelRecord } from "@/lib/db";
 import { TopBar } from "./TopBar";
 import { ChannelFilters } from "./ChannelFilters";
@@ -9,7 +10,8 @@ import { ActivityTab } from "./ActivityTab";
 import { ExportControls } from "./ExportControls";
 import { UnsubscribeConfirmModal } from "./UnsubscribeConfirmModal";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { readActionStream, type StreamProgress } from "@/lib/actionStream";
+import { readActionStream, type StreamProgress, type StreamSummary } from "@/lib/actionStream";
+import { fetchJson, postJson, categoriesQueryOptions, syncStatusQueryOptions, UnauthorizedError } from "@/lib/api";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -35,20 +37,34 @@ interface UnsubscribeTarget {
   label?: string;
 }
 
+interface ChannelsResponse {
+  channels: ChannelRecord[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+interface SyncResponse {
+  count: number;
+  errors?: { reason: string; message: string }[];
+  lastSyncedAt?: string;
+}
+
 export function Dashboard({ onDisconnect }: DashboardProps) {
-  const [disconnecting, setDisconnecting] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+
   const [quotaError, setQuotaError] = useState<{ message: string; count: number } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
+  const clearBanners = () => {
+    setQuotaError(null);
+    setActionError(null);
+    setSuccessMessage(null);
+  };
+
   // Tab State
   const [activeTab, setActiveTab] = useState("channels");
-
-  // Bumped whenever channel data changes so dependent tabs refetch.
-  const [refreshKey, setRefreshKey] = useState(0);
-  const bumpRefresh = useCallback(() => setRefreshKey((n) => n + 1), []);
 
   // Filter & Sort State
   const [searchQuery, setSearchQuery] = useState("");
@@ -58,17 +74,13 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
   const [sortBy, setSortBy] = useState("title");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [category, setCategory] = useState("");
-  const [categories, setCategories] = useState<string[]>([]);
 
   // Pagination State
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-  const [totalChannels, setTotalChannels] = useState(0);
 
-  // Channels & Selection State
-  const [channels, setChannels] = useState<ChannelRecord[]>([]);
+  // Selection State
   const [selectedChannelIds, setSelectedChannelIds] = useState<Set<string>>(new Set());
-  const [isLoadingChannels, setIsLoadingChannels] = useState(false);
 
   // Debounce search inputs
   useEffect(() => {
@@ -87,23 +99,10 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
     return () => clearTimeout(timer);
   }, [tagQuery]);
 
-  // Fetch Categories
-  const fetchCategories = useCallback(async () => {
-    try {
-      const res = await fetch("/api/categories");
-      if (res.ok) {
-        const data = await res.json();
-        setCategories(data.categories || []);
-      }
-    } catch (err) {
-      console.error("Failed to fetch categories:", err);
-    }
-  }, []);
-
-  // Fetch Channels
-  const fetchChannels = useCallback(async () => {
-    setIsLoadingChannels(true);
-    try {
+  // Queries
+  const channelsQuery = useQuery({
+    queryKey: ["channels", { q: debouncedSearch, tag: debouncedTag, sortBy, sortDir, category, page, pageSize }],
+    queryFn: () => {
       const params = new URLSearchParams();
       if (debouncedSearch) params.set("q", debouncedSearch);
       if (debouncedTag) params.set("tag", debouncedTag);
@@ -112,105 +111,83 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
       if (category) params.set("category", category);
       params.set("page", String(page));
       params.set("pageSize", String(pageSize));
+      return fetchJson<ChannelsResponse>(`/api/channels?${params.toString()}`);
+    },
+    placeholderData: keepPreviousData,
+  });
+  const channels = channelsQuery.data?.channels ?? [];
+  const totalChannels = channelsQuery.data?.total ?? 0;
 
-      const res = await fetch(`/api/channels?${params.toString()}`);
-      if (res.status === 401) {
-        onDisconnect();
-        return;
-      }
+  const categoriesQuery = useQuery(categoriesQueryOptions);
+  const categories = categoriesQuery.data?.categories ?? [];
 
-      if (res.ok) {
-        const data = await res.json();
-        setChannels(data.channels || []);
-        setTotalChannels(data.total || 0);
-      }
-    } catch (err) {
-      console.error("Failed to fetch channels:", err);
-    } finally {
-      setIsLoadingChannels(false);
-    }
-  }, [debouncedSearch, debouncedTag, sortBy, sortDir, category, page, pageSize, onDisconnect]);
+  const syncStatusQuery = useQuery(syncStatusQueryOptions);
+  const lastSyncedAt = syncStatusQuery.data?.lastSyncedAt ?? null;
 
-  // Fetch Sync Status
-  const fetchSyncStatus = useCallback(async () => {
-    try {
-      const res = await fetch("/api/sync");
-      if (res.ok) {
-        const data = await res.json();
-        setLastSyncedAt(data.lastSyncedAt || null);
-      }
-    } catch (err) {
-      console.error("Failed to fetch sync status:", err);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchSyncStatus();
-  }, [fetchSyncStatus]);
-
-  useEffect(() => {
-    fetchCategories();
-  }, [fetchCategories, refreshKey]);
-
-  useEffect(() => {
-    fetchChannels();
-  }, [fetchChannels, refreshKey]);
-
-  // Sync Action
-  const handleSync = async () => {
-    setIsSyncing(true);
-    setQuotaError(null);
-    setActionError(null);
-    setSuccessMessage(null);
-
-    try {
-      const res = await fetch("/api/sync", { method: "POST" });
-      const data = await res.json();
-
-      if (res.status === 401) {
-        onDisconnect();
-        return;
-      }
-
-      if (res.ok) {
-        if (data.lastSyncedAt) {
-          setLastSyncedAt(data.lastSyncedAt);
-        }
-
-        const quotaErr = data.errors?.find((e: any) => e.reason === "quotaExceeded");
-        if (quotaErr) {
-          setQuotaError({
-            message: quotaErr.message || "YouTube API daily quota exceeded.",
-            count: data.count ?? 0,
-          });
-        } else {
-          setSuccessMessage(`Successfully synced ${data.count} channel${data.count === 1 ? "" : "s"}.`);
-        }
-
-        bumpRefresh();
-      }
-    } catch (err) {
-      console.error("Failed to sync:", err);
-      setActionError("Sync failed. Check your connection and try again.");
-    } finally {
-      setIsSyncing(false);
-    }
+  const invalidateChannelData = () => {
+    queryClient.invalidateQueries({ queryKey: ["channels"] });
+    queryClient.invalidateQueries({ queryKey: ["categories"] });
+    queryClient.invalidateQueries({ queryKey: ["actions"] });
   };
 
-  const handleDisconnect = async () => {
-    setDisconnecting(true);
-    try {
-      const res = await fetch("/api/auth/disconnect", { method: "POST" });
-      if (res.ok) {
-        onDisconnect();
+  // Mutations
+  const syncMutation = useMutation({
+    mutationFn: () => postJson<SyncResponse>("/api/sync"),
+    onMutate: clearBanners,
+    onSuccess: (data) => {
+      const quotaErr = data.errors?.find((e) => e.reason === "quotaExceeded");
+      if (quotaErr) {
+        setQuotaError({
+          message: quotaErr.message || "YouTube API daily quota exceeded.",
+          count: data.count ?? 0,
+        });
       } else {
-        console.error("Failed to disconnect");
+        setSuccessMessage(`Successfully synced ${data.count} channel${data.count === 1 ? "" : "s"}.`);
       }
-    } catch (err) {
+      queryClient.invalidateQueries({ queryKey: ["syncStatus"] });
+      invalidateChannelData();
+    },
+    onError: (err) => {
+      if (err instanceof UnauthorizedError) return;
+      console.error("Failed to sync:", err);
+      setActionError(err.message || "Sync failed. Check your connection and try again.");
+    },
+  });
+
+  const disconnectMutation = useMutation({
+    mutationFn: () => postJson("/api/auth/disconnect"),
+    onSuccess: onDisconnect,
+    onError: (err) => {
       console.error("Disconnect error:", err);
-    } finally {
-      setDisconnecting(false);
-    }
+      setActionError("Failed to disconnect. Try again.");
+    },
+  });
+
+  const tagMutation = useMutation({
+    mutationFn: (input: { channelIds: string[]; category?: string; tags?: string[] }) =>
+      postJson<{ updatedCount: number }>("/api/channels/tag", input),
+    onSuccess: () => {
+      setSelectedChannelIds(new Set());
+      invalidateChannelData();
+    },
+    onError: (err) => {
+      if (err instanceof UnauthorizedError) return;
+      console.error("Bulk tag/category error:", err);
+      setActionError(err.message || "Failed to apply category/tags.");
+    },
+  });
+
+  const handleBulkTagCategory = async (categoryToApply?: string, tagsToApply?: string[]) => {
+    if (selectedChannelIds.size === 0) return;
+    await tagMutation
+      .mutateAsync({
+        channelIds: Array.from(selectedChannelIds),
+        category: categoryToApply,
+        tags: tagsToApply,
+      })
+      .catch(() => {
+        // Errors are surfaced via the mutation's onError banner.
+      });
   };
 
   // Selection Logic
@@ -241,111 +218,36 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
         if (category) params.set("category", category);
         params.set("allIdsOnly", "true");
 
-        const res = await fetch(`/api/channels?${params.toString()}`);
-        if (res.ok) {
-          const data = await res.json();
-          setSelectedChannelIds(new Set(data.channelIds || []));
-        } else {
-          // Fallback to selecting current page channels
-          setSelectedChannelIds(new Set(channels.map((c) => c.channel_id)));
-        }
+        const data = await fetchJson<{ channelIds: string[] }>(`/api/channels?${params.toString()}`);
+        setSelectedChannelIds(new Set(data.channelIds || []));
       } catch {
+        // Fallback to selecting current page channels
         setSelectedChannelIds(new Set(channels.map((c) => c.channel_id)));
       }
     }
   };
 
-  const handleBulkTagCategory = async (categoryToApply?: string, tagsToApply?: string[]) => {
-    if (selectedChannelIds.size === 0) return;
-
-    try {
-      const res = await fetch("/api/channels/tag", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          channelIds: Array.from(selectedChannelIds),
-          category: categoryToApply,
-          tags: tagsToApply,
-        }),
-      });
-
-      if (res.status === 401) {
-        onDisconnect();
-        return;
-      }
-
-      if (res.ok) {
-        setSelectedChannelIds(new Set());
-        bumpRefresh();
-      }
-    } catch (err) {
-      console.error("Bulk tag/category error:", err);
-    }
-  };
-
   // Unsubscribe State (driven by a target: current selection or a whole category)
   const [unsubscribeTarget, setUnsubscribeTarget] = useState<UnsubscribeTarget | null>(null);
-  const [isUnsubscribing, setIsUnsubscribing] = useState(false);
   const [unsubscribeProgress, setUnsubscribeProgress] = useState<StreamProgress | null>(null);
 
-  const handleOpenSelectionUnsubscribe = () => {
-    const preview = channels
-      .filter((c) => selectedChannelIds.has(c.channel_id))
-      .map((c) => ({ channel_id: c.channel_id, title: c.title }));
-    setUnsubscribeTarget({ channelIds: Array.from(selectedChannelIds), preview });
-  };
-
-  const handleOpenCategoryUnsubscribe = async (cat: string) => {
-    try {
-      const idsRes = await fetch(`/api/channels?category=${encodeURIComponent(cat)}&allIdsOnly=true`);
-      const previewRes = await fetch(`/api/channels?category=${encodeURIComponent(cat)}&page=1&pageSize=50`);
-      if (!idsRes.ok || !previewRes.ok) throw new Error("Failed to load channels for category.");
-
-      const idsData = await idsRes.json();
-      const previewData = await previewRes.json();
-      const channelIds: string[] = idsData.channelIds || [];
-      if (channelIds.length === 0) return;
-
-      setUnsubscribeTarget({
-        channelIds,
-        preview: (previewData.channels || []).map((c: ChannelRecord) => ({
-          channel_id: c.channel_id,
-          title: c.title,
-        })),
-        label: `category "${cat}"`,
-      });
-    } catch (err) {
-      console.error("Failed to prepare category unsubscribe:", err);
-      setActionError("Could not load the channels for that category. Try again.");
-    }
-  };
-
-  const handleUnsubscribeConfirm = async () => {
-    const target = unsubscribeTarget;
-    if (!target || target.channelIds.length === 0) return;
-
-    setIsUnsubscribing(true);
-    setUnsubscribeProgress({ processed: 0, total: target.channelIds.length });
-    setQuotaError(null);
-    setActionError(null);
-    setSuccessMessage(null);
-
-    try {
+  const unsubscribeMutation = useMutation({
+    mutationFn: async (channelIds: string[]): Promise<StreamSummary> => {
       const res = await fetch("/api/channels/unsubscribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channelIds: target.channelIds }),
+        body: JSON.stringify({ channelIds }),
       });
-
-      if (res.status === 401) {
-        onDisconnect();
-        return;
-      }
-
-      const { succeeded, failed, quotaStopped } = await readActionStream(res, setUnsubscribeProgress);
-
+      if (res.status === 401) throw new UnauthorizedError();
+      return readActionStream(res, setUnsubscribeProgress);
+    },
+    onMutate: (channelIds) => {
+      clearBanners();
+      setUnsubscribeProgress({ processed: 0, total: channelIds.length });
+    },
+    onSuccess: ({ succeeded, failed, quotaStopped }, channelIds) => {
       if (quotaStopped) {
-        const remaining = target.channelIds.length - succeeded.length - failed.length;
+        const remaining = channelIds.length - succeeded.length - failed.length;
         setQuotaError({
           message: `YouTube API quota limit reached. Unsubscribed ${succeeded.length} channel${
             succeeded.length === 1 ? "" : "s"
@@ -360,32 +262,71 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
       } else if (succeeded.length > 0) {
         setSuccessMessage(`Successfully unsubscribed from ${succeeded.length} channel${succeeded.length === 1 ? "" : "s"}.`);
       }
-    } catch (err: any) {
+    },
+    onError: (err) => {
+      if (err instanceof UnauthorizedError) return;
       console.error("Bulk unsubscribe failed:", err);
       setActionError(
-        `${err?.message || "Bulk unsubscribe failed."} Progress up to the interruption was saved; check the Activity tab to redo the remainder.`
+        `${err.message || "Bulk unsubscribe failed."} Progress up to the interruption was saved; check the Activity tab to redo the remainder.`
       );
-    } finally {
-      setIsUnsubscribing(false);
+    },
+    onSettled: () => {
       setUnsubscribeProgress(null);
       setUnsubscribeTarget(null);
       setSelectedChannelIds(new Set());
       // Always refresh: the server removes rows as it goes, so even an
       // interrupted batch changed local state.
-      bumpRefresh();
+      invalidateChannelData();
+    },
+  });
+
+  const handleOpenSelectionUnsubscribe = () => {
+    const preview = channels
+      .filter((c) => selectedChannelIds.has(c.channel_id))
+      .map((c) => ({ channel_id: c.channel_id, title: c.title }));
+    setUnsubscribeTarget({ channelIds: Array.from(selectedChannelIds), preview });
+  };
+
+  const handleOpenCategoryUnsubscribe = async (cat: string) => {
+    try {
+      const [idsData, previewData] = await Promise.all([
+        fetchJson<{ channelIds: string[] }>(`/api/channels?category=${encodeURIComponent(cat)}&allIdsOnly=true`),
+        fetchJson<ChannelsResponse>(`/api/channels?category=${encodeURIComponent(cat)}&page=1&pageSize=50`),
+      ]);
+
+      const channelIds = idsData.channelIds || [];
+      if (channelIds.length === 0) return;
+
+      setUnsubscribeTarget({
+        channelIds,
+        preview: (previewData.channels || []).map((c) => ({ channel_id: c.channel_id, title: c.title })),
+        label: `category "${cat}"`,
+      });
+    } catch (err) {
+      if (err instanceof UnauthorizedError) return;
+      console.error("Failed to prepare category unsubscribe:", err);
+      setActionError("Could not load the channels for that category. Try again.");
     }
+  };
+
+  const handleUnsubscribeConfirm = () => {
+    const target = unsubscribeTarget;
+    if (!target || target.channelIds.length === 0 || unsubscribeMutation.isPending) return;
+    unsubscribeMutation.mutate(target.channelIds);
   };
 
   const isAllSelected = totalChannels > 0 && selectedChannelIds.size === totalChannels;
   const totalPages = Math.ceil(totalChannels / pageSize) || 1;
+  const isSyncing = syncMutation.isPending;
+  const disconnecting = disconnectMutation.isPending;
 
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">
       <TopBar
         lastSyncedAt={lastSyncedAt}
         isSyncing={isSyncing}
-        onSync={handleSync}
-        onDisconnect={handleDisconnect}
+        onSync={() => syncMutation.mutate()}
+        onDisconnect={() => disconnectMutation.mutate()}
         disconnecting={disconnecting}
       />
 
@@ -501,7 +442,7 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
                 <div className="flex items-center gap-2">
                   <Button
                     onClick={() => setPage((p) => Math.max(1, p - 1))}
-                    disabled={page <= 1 || isLoadingChannels}
+                    disabled={page <= 1 || channelsQuery.isFetching}
                     variant="outline"
                     size="icon-sm"
                     aria-label="Previous page"
@@ -515,7 +456,7 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
 
                   <Button
                     onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                    disabled={page >= totalPages || isLoadingChannels}
+                    disabled={page >= totalPages || channelsQuery.isFetching}
                     variant="outline"
                     size="icon-sm"
                     aria-label="Next page"
@@ -529,7 +470,6 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
 
           <TabsContent value="categories">
             <CategoriesTab
-              refreshKey={refreshKey}
               onBrowse={(cat) => {
                 setCategory(cat);
                 setPage(1);
@@ -541,13 +481,10 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
 
           <TabsContent value="activity">
             <ActivityTab
-              refreshKey={refreshKey}
               onDataChanged={() => {
                 // A redo may have resolved whatever an earlier banner reported.
-                setQuotaError(null);
-                setActionError(null);
-                setSuccessMessage(null);
-                bumpRefresh();
+                clearBanners();
+                invalidateChannelData();
               }}
             />
           </TabsContent>
@@ -583,9 +520,9 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
         targetLabel={unsubscribeTarget?.label}
         onConfirm={handleUnsubscribeConfirm}
         onCancel={() => {
-          if (!isUnsubscribing) setUnsubscribeTarget(null);
+          if (!unsubscribeMutation.isPending) setUnsubscribeTarget(null);
         }}
-        isUnsubscribing={isUnsubscribing}
+        isUnsubscribing={unsubscribeMutation.isPending}
         progress={unsubscribeProgress}
       />
     </div>

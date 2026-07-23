@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { History, Loader2, RotateCcw, Tag, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { readActionStream, type StreamProgress } from "@/lib/actionStream";
+import { readActionStream, type StreamProgress, type StreamSummary } from "@/lib/actionStream";
+import { fetchJson, UnauthorizedError } from "@/lib/api";
 
 export interface ActionEntry {
   id: number;
@@ -21,8 +23,6 @@ export interface ActionEntry {
 }
 
 interface ActivityTabProps {
-  /** Bumped by the parent whenever channel data changes, to trigger a refetch. */
-  refreshKey: number;
   /** Called after a redo completes so the parent can refresh channel data. */
   onDataChanged: () => void;
 }
@@ -56,68 +56,62 @@ function formatTimestamp(isoString: string): string {
   }
 }
 
-export function ActivityTab({ refreshKey, onDataChanged }: ActivityTabProps) {
-  const [actions, setActions] = useState<ActionEntry[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+function summarizeRedo(summary: StreamSummary): string {
+  const bits: string[] = [];
+  if (summary.succeeded.length > 0) bits.push(`${summary.succeeded.length} succeeded`);
+  if (summary.skipped.length > 0) bits.push(`${summary.skipped.length} already done`);
+  if (summary.failed.length > 0) bits.push(`${summary.failed.length} failed`);
+  if (summary.quotaStopped) bits.push("stopped by quota");
+  return `Redo complete: ${bits.length > 0 ? bits.join(", ") : "nothing left to do"}.`;
+}
+
+export function ActivityTab({ onDataChanged }: ActivityTabProps) {
   const [confirmingId, setConfirmingId] = useState<number | null>(null);
-  const [redoingId, setRedoingId] = useState<number | null>(null);
   const [redoProgress, setRedoProgress] = useState<StreamProgress | null>(null);
   const [redoResult, setRedoResult] = useState<{ id: number; message: string; isError: boolean } | null>(null);
-  const [localBump, setLocalBump] = useState(0);
 
-  useEffect(() => {
-    let cancelled = false;
-    setIsLoading(true);
-    fetch("/api/actions")
-      .then((res) => (res.ok ? res.json() : { actions: [] }))
-      .then((data) => {
-        if (!cancelled) setActions(data.actions || []);
-      })
-      .catch((err) => console.error("Failed to fetch actions:", err))
-      .finally(() => {
-        if (!cancelled) setIsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshKey, localBump]);
+  const actionsQuery = useQuery({
+    queryKey: ["actions"],
+    queryFn: () => fetchJson<{ actions: ActionEntry[] }>("/api/actions"),
+  });
+  const actions = actionsQuery.data?.actions ?? [];
 
-  const handleRedo = async (action: ActionEntry) => {
-    setConfirmingId(null);
-    setRedoingId(action.id);
-    setRedoProgress(null);
-    setRedoResult(null);
-
-    try {
+  const redoMutation = useMutation({
+    mutationFn: async (action: ActionEntry): Promise<StreamSummary> => {
       const res = await fetch(`/api/actions/${action.id}/redo`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
-      const summary = await readActionStream(res, setRedoProgress);
-
-      const bits: string[] = [];
-      if (summary.succeeded.length > 0) bits.push(`${summary.succeeded.length} succeeded`);
-      if (summary.skipped.length > 0) bits.push(`${summary.skipped.length} already done`);
-      if (summary.failed.length > 0) bits.push(`${summary.failed.length} failed`);
-      if (summary.quotaStopped) bits.push("stopped by quota");
+      if (res.status === 401) throw new UnauthorizedError();
+      return readActionStream(res, setRedoProgress);
+    },
+    onMutate: () => {
+      setConfirmingId(null);
+      setRedoProgress(null);
+      setRedoResult(null);
+    },
+    onSuccess: (summary, action) => {
       setRedoResult({
         id: action.id,
-        message: `Redo complete: ${bits.length > 0 ? bits.join(", ") : "nothing left to do"}.`,
+        message: summarizeRedo(summary),
         isError: summary.failed.length > 0 || summary.quotaStopped,
       });
-    } catch (err: any) {
+    },
+    onError: (err, action) => {
+      if (err instanceof UnauthorizedError) return;
       console.error("Redo failed:", err);
-      setRedoResult({ id: action.id, message: err?.message || "Redo failed.", isError: true });
-    } finally {
-      setRedoingId(null);
+      setRedoResult({ id: action.id, message: err.message || "Redo failed.", isError: true });
+    },
+    onSettled: () => {
       setRedoProgress(null);
-      setLocalBump((n) => n + 1);
       onDataChanged();
-    }
-  };
+    },
+  });
 
-  if (isLoading && actions.length === 0) {
+  const redoingId = redoMutation.isPending ? redoMutation.variables?.id : null;
+
+  if (actionsQuery.isPending) {
     return (
       <div className="flex items-center justify-center gap-2 rounded-xl border bg-card p-12 text-sm text-muted-foreground">
         <Loader2 className="size-4 animate-spin" />
@@ -196,7 +190,7 @@ export function ActivityTab({ refreshKey, onDataChanged }: ActivityTabProps) {
                 <div className="flex items-center gap-2">
                   {isConfirming ? (
                     <>
-                      <Button onClick={() => handleRedo(action)} variant="destructive" size="sm">
+                      <Button onClick={() => redoMutation.mutate(action)} variant="destructive" size="sm">
                         <RotateCcw />
                         Confirm redo
                       </Button>
@@ -207,9 +201,9 @@ export function ActivityTab({ refreshKey, onDataChanged }: ActivityTabProps) {
                   ) : (
                     <Button
                       onClick={() =>
-                        action.type === "unsubscribe" ? setConfirmingId(action.id) : handleRedo(action)
+                        action.type === "unsubscribe" ? setConfirmingId(action.id) : redoMutation.mutate(action)
                       }
-                      disabled={redoingId !== null}
+                      disabled={redoMutation.isPending}
                       variant="outline"
                       size="sm"
                     >

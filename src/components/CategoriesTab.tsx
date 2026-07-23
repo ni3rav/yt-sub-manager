@@ -1,40 +1,18 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { FolderOpen, Loader2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-
-export interface CategoryStat {
-  category: string;
-  channelCount: number;
-}
+import { categoriesQueryOptions } from "@/lib/api";
 
 interface CategoriesTabProps {
-  /** Bumped by the parent whenever channel data changes, to trigger a refetch. */
-  refreshKey: number;
   onBrowse: (category: string) => void;
   onUnsubscribeCategory: (category: string) => Promise<void>;
 }
 
-export function CategoriesTab({ refreshKey, onBrowse, onUnsubscribeCategory }: CategoriesTabProps) {
-  const [stats, setStats] = useState<CategoryStat[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+export function CategoriesTab({ onBrowse, onUnsubscribeCategory }: CategoriesTabProps) {
+  const categoriesQuery = useQuery(categoriesQueryOptions);
+  const stats = categoriesQuery.data?.stats ?? [];
   const [preparingCategory, setPreparingCategory] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setIsLoading(true);
-    fetch("/api/categories")
-      .then((res) => (res.ok ? res.json() : { stats: [] }))
-      .then((data) => {
-        if (!cancelled) setStats(data.stats || []);
-      })
-      .catch((err) => console.error("Failed to fetch category stats:", err))
-      .finally(() => {
-        if (!cancelled) setIsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshKey]);
 
   const handleUnsubscribe = async (category: string) => {
     setPreparingCategory(category);
@@ -45,7 +23,7 @@ export function CategoriesTab({ refreshKey, onBrowse, onUnsubscribeCategory }: C
     }
   };
 
-  if (isLoading) {
+  if (categoriesQuery.isPending) {
     return (
       <div className="flex items-center justify-center gap-2 rounded-xl border bg-card p-12 text-sm text-muted-foreground">
         <Loader2 className="size-4 animate-spin" />

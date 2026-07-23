@@ -1,5 +1,7 @@
 import { useState, type FormEvent } from "react";
+import { useMutation } from "@tanstack/react-query";
 import { PlaySquare, ExternalLink, Key, ArrowRight, AlertCircle } from "lucide-react";
+import { postJson } from "@/lib/api";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -33,43 +35,32 @@ const SETUP_STEPS = [
 export function SetupScreen({ initialError, onSetupSuccess }: SetupScreenProps) {
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(initialError || null);
 
-  const handleSubmit = async (e: FormEvent) => {
+  const setupMutation = useMutation({
+    mutationFn: (creds: { clientId: string; clientSecret: string }) =>
+      postJson<{ authUrl?: string }>("/api/auth/setup", creds),
+    onMutate: () => setError(null),
+    onSuccess: (data) => {
+      if (data.authUrl) {
+        onSetupSuccess(data.authUrl);
+      } else {
+        setError("No authorization URL returned from server.");
+      }
+    },
+    onError: (err) => setError(err.message || "An unexpected error occurred."),
+  });
+
+  // Stays true after success too: the browser is about to navigate to Google.
+  const loading = setupMutation.isPending || Boolean(setupMutation.data?.authUrl);
+
+  const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (!clientId.trim() || !clientSecret.trim()) {
       setError("Please fill out both Client ID and Client Secret.");
       return;
     }
-
-    setLoading(true);
-    setError(null);
-
-    try {
-      const res = await fetch("/api/auth/setup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          clientId: clientId.trim(),
-          clientSecret: clientSecret.trim(),
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "Failed to initiate OAuth setup.");
-      }
-
-      if (data.authUrl) {
-        onSetupSuccess(data.authUrl);
-      } else {
-        throw new Error("No authorization URL returned from server.");
-      }
-    } catch (err: any) {
-      setError(err?.message || "An unexpected error occurred.");
-      setLoading(false);
-    }
+    setupMutation.mutate({ clientId: clientId.trim(), clientSecret: clientSecret.trim() });
   };
 
   return (
