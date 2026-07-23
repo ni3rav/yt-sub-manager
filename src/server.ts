@@ -6,7 +6,7 @@ import { decryptCredentials, encryptCredentials, deleteCredentials, type AppCred
 import { openBrowser } from "./lib/browser";
 import { createOAuth2Client, getStoredOAuth2Client, verifyOrRefreshTokens, AuthRevokedError } from "./lib/oauth";
 import { initDatabase, upsertChannels, getChannelsStats, getChannels, getAllMatchingChannelIds, getDistinctCategories, bulkTagAndCategory, getSubscriptionIds, deleteChannels, InvalidSortError, createExportStream } from "./lib/db";
-import { fetchAllSubscriptions, createYouTubeClient, QuotaExceededError, isQuotaExceededError } from "./lib/youtube";
+import { fetchAllSubscriptions, createYouTubeClient, QuotaExceededError, isQuotaExceededError, isSubscriptionNotFoundError } from "./lib/youtube";
 
 export interface ServerOptions {
   port?: number;
@@ -50,6 +50,9 @@ export function createAppServer(options: ServerOptions = {}): Server<unknown> {
   const server = Bun.serve({
     hostname,
     port,
+    // Full syncs page through the YouTube API and can quietly exceed the
+    // default 10 s idle timeout for accounts with many subscriptions.
+    idleTimeout: 120,
     routes: {
       "/api/auth/status": {
         async GET() {
@@ -301,70 +304,98 @@ export function createAppServer(options: ServerOptions = {}): Server<unknown> {
           const authErr = await authenticateRequest(appDataDir);
           if (authErr) return authErr;
 
-          try {
-            const body = await req.json().catch(() => null);
-            if (!body || !Array.isArray(body.channelIds) || body.channelIds.length === 0) {
-              return Response.json({ error: "channelIds must be a non-empty array." }, { status: 400 });
+          const body = await req.json().catch(() => null);
+          if (!body || !Array.isArray(body.channelIds) || body.channelIds.length === 0) {
+            return Response.json({ error: "channelIds must be a non-empty array." }, { status: 400 });
+          }
+
+          let ytClient = options.youtubeClient;
+          if (!ytClient) {
+            const redirectUri = `http://127.0.0.1:${server.port}/oauth/callback`;
+            const oauth2Client = getStoredOAuth2Client(appDataDir, redirectUri);
+            if (!oauth2Client) {
+              return Response.json({ error: "OAuth client not initialized." }, { status: 401 });
             }
+            ytClient = createYouTubeClient(oauth2Client);
+          }
 
-            const channelIds: string[] = body.channelIds;
-            const subRecords = getSubscriptionIds(db, channelIds);
-            const subMap = new Map(subRecords.map((r) => [r.channel_id, r.subscription_id]));
+          const channelIds: string[] = body.channelIds;
+          const interCallDelayMs = typeof body.interCallDelayMs === "number" ? body.interCallDelayMs : 250;
+          const subRecords = getSubscriptionIds(db, channelIds);
+          const subMap = new Map(subRecords.map((r) => [r.channel_id, r.subscription_id]));
 
-            let ytClient = options.youtubeClient;
-            if (!ytClient) {
-              const redirectUri = `http://127.0.0.1:${server.port}/oauth/callback`;
-              const oauth2Client = getStoredOAuth2Client(appDataDir, redirectUri);
-              if (!oauth2Client) {
-                return Response.json({ error: "OAuth client not initialized." }, { status: 401 });
-              }
-              ytClient = createYouTubeClient(oauth2Client);
-            }
+          // Stream newline-delimited JSON progress events. A buffered JSON
+          // response would trip the connection idle timeout on large batches
+          // (250 ms delay per channel adds up), and the client needs a live
+          // progress counter anyway.
+          const encoder = new TextEncoder();
+          const total = channelIds.length;
 
-            const succeeded: string[] = [];
-            const failed: { channelId: string; reason: string }[] = [];
-            let quotaStopped = false;
+          const stream = new ReadableStream({
+            async start(controller) {
+              const emit = (event: Record<string, unknown>) => {
+                controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
+              };
 
-            const interCallDelayMs = typeof body.interCallDelayMs === "number" ? body.interCallDelayMs : 250;
-
-            for (let i = 0; i < channelIds.length; i++) {
-              const channelId = channelIds[i];
-              const subscriptionId = subMap.get(channelId);
-
-              if (!subscriptionId) {
-                failed.push({ channelId, reason: "Subscription ID not found" });
-                continue;
-              }
-
-              if (i > 0 && interCallDelayMs > 0) {
-                await Bun.sleep(interCallDelayMs);
-              }
+              const succeeded: string[] = [];
+              const failed: { channelId: string; reason: string }[] = [];
+              let quotaStopped = false;
 
               try {
-                await ytClient.subscriptions.delete({ id: subscriptionId });
-                succeeded.push(channelId);
-              } catch (err: any) {
-                if (isQuotaExceededError(err)) {
-                  quotaStopped = true;
-                  break;
-                } else {
-                  failed.push({ channelId, reason: err?.message || "Failed to unsubscribe" });
+                for (let i = 0; i < channelIds.length; i++) {
+                  const channelId = channelIds[i]!;
+                  const subscriptionId = subMap.get(channelId);
+
+                  if (!subscriptionId) {
+                    const reason = "Subscription ID not found";
+                    failed.push({ channelId, reason });
+                    emit({ type: "progress", processed: i + 1, total, channelId, status: "failed", reason });
+                    continue;
+                  }
+
+                  if (i > 0 && interCallDelayMs > 0) {
+                    await Bun.sleep(interCallDelayMs);
+                  }
+
+                  try {
+                    await ytClient.subscriptions.delete({ id: subscriptionId });
+                    succeeded.push(channelId);
+                    // Delete immediately so an interrupted batch leaves the
+                    // local DB consistent with YouTube.
+                    deleteChannels(db, [channelId]);
+                    emit({ type: "progress", processed: i + 1, total, channelId, status: "ok" });
+                  } catch (err: any) {
+                    if (isQuotaExceededError(err)) {
+                      quotaStopped = true;
+                      break;
+                    }
+                    if (isSubscriptionNotFoundError(err)) {
+                      // Already unsubscribed on YouTube; converge local state.
+                      succeeded.push(channelId);
+                      deleteChannels(db, [channelId]);
+                      emit({ type: "progress", processed: i + 1, total, channelId, status: "ok" });
+                    } else {
+                      const reason = err?.message || "Failed to unsubscribe";
+                      failed.push({ channelId, reason });
+                      emit({ type: "progress", processed: i + 1, total, channelId, status: "failed", reason });
+                    }
+                  }
                 }
+              } catch (err: any) {
+                emit({ type: "error", message: err?.message || "Failed to unsubscribe channels." });
               }
-            }
 
-            if (succeeded.length > 0) {
-              deleteChannels(db, succeeded);
-            }
+              emit({ type: "done", succeeded, failed, quotaStopped });
+              controller.close();
+            },
+          });
 
-            return Response.json({
-              succeeded,
-              failed,
-              quotaStopped,
-            });
-          } catch (err: any) {
-            return Response.json({ error: err?.message || "Failed to unsubscribe channels." }, { status: 500 });
-          }
+          return new Response(stream, {
+            headers: {
+              "Content-Type": "application/x-ndjson; charset=utf-8",
+              "Cache-Control": "no-store",
+            },
+          });
         },
       },
 

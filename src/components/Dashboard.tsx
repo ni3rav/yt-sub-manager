@@ -5,11 +5,16 @@ import { ChannelTable } from "./ChannelTable";
 import { BulkActionBar } from "./BulkActionBar";
 import { ExportControls } from "./ExportControls";
 import { UnsubscribeConfirmModal } from "./UnsubscribeConfirmModal";
-import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Layers } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface DashboardProps {
   onDisconnect: () => void;
+}
+
+export interface UnsubscribeProgress {
+  processed: number;
+  total: number;
 }
 
 export function Dashboard({ onDisconnect }: DashboardProps) {
@@ -17,7 +22,8 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [quotaError, setQuotaError] = useState<{ message: string; count: number } | null>(null);
-  const [syncSuccessMessage, setSyncSuccessMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   // Filter & Sort State
   const [searchQuery, setSearchQuery] = useState("");
@@ -126,7 +132,8 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
   const handleSync = async () => {
     setIsSyncing(true);
     setQuotaError(null);
-    setSyncSuccessMessage(null);
+    setActionError(null);
+    setSuccessMessage(null);
 
     try {
       const res = await fetch("/api/sync", { method: "POST" });
@@ -149,7 +156,7 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
             count: data.count ?? 0,
           });
         } else {
-          setSyncSuccessMessage(`Successfully synced ${data.count} channel${data.count === 1 ? "" : "s"}.`);
+          setSuccessMessage(`Successfully synced ${data.count} channel${data.count === 1 ? "" : "s"}.`);
         }
 
         fetchCategories();
@@ -157,6 +164,7 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
       }
     } catch (err) {
       console.error("Failed to sync:", err);
+      setActionError("Sync failed. Check your connection and try again.");
     } finally {
       setIsSyncing(false);
     }
@@ -174,7 +182,7 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
     } catch (err) {
       console.error("Disconnect error:", err);
     } finally {
-      setIsSyncing(false);
+      setDisconnecting(false);
     }
   };
 
@@ -252,13 +260,20 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
   // Unsubscribe Modal State
   const [isUnsubscribeModalOpen, setIsUnsubscribeModalOpen] = useState(false);
   const [isUnsubscribing, setIsUnsubscribing] = useState(false);
+  const [unsubscribeProgress, setUnsubscribeProgress] = useState<UnsubscribeProgress | null>(null);
 
   const handleBulkUnsubscribeConfirm = async () => {
     if (selectedChannelIds.size === 0) return;
 
     setIsUnsubscribing(true);
+    setUnsubscribeProgress({ processed: 0, total: selectedChannelIds.size });
     setQuotaError(null);
-    setSyncSuccessMessage(null);
+    setActionError(null);
+    setSuccessMessage(null);
+
+    let summary: { succeeded: string[]; failed: { channelId: string; reason: string }[]; quotaStopped: boolean } | null =
+      null;
+    let streamError: string | null = null;
 
     try {
       const res = await fetch("/api/channels/unsubscribe", {
@@ -272,32 +287,76 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
         return;
       }
 
-      if (res.ok) {
-        const data = await res.json();
-        const succeededCount = data.succeeded?.length || 0;
-        const quotaStopped = Boolean(data.quotaStopped);
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Unsubscribe request failed (HTTP ${res.status}).`);
+      }
 
-        if (quotaStopped) {
-          const remainingCount = selectedChannelIds.size - succeededCount;
-          setQuotaError({
-            message: `YouTube API quota limit reached. Unsubscribed ${succeededCount} channel${
-              succeededCount === 1 ? "" : "s"
-            }. ${remainingCount} channel${remainingCount === 1 ? "" : "s"} could not be unsubscribed today.`,
-            count: succeededCount,
-          });
-        } else if (succeededCount > 0) {
-          setSyncSuccessMessage(`Successfully unsubscribed from ${succeededCount} channel${succeededCount === 1 ? "" : "s"}.`);
+      // The server streams one NDJSON event per channel so we can show a
+      // live counter and keep the connection alive on large batches.
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n");
+        buffer = done ? "" : (lines.pop() ?? "");
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line);
+          if (event.type === "progress") {
+            setUnsubscribeProgress({ processed: event.processed, total: event.total });
+          } else if (event.type === "done") {
+            summary = event;
+          } else if (event.type === "error") {
+            streamError = event.message;
+          }
         }
 
-        setSelectedChannelIds(new Set());
-        setIsUnsubscribeModalOpen(false);
-        await fetchCategories();
-        await fetchChannels();
+        if (done) break;
       }
-    } catch (err) {
+
+      if (!summary) {
+        throw new Error(streamError || "The unsubscribe operation was interrupted.");
+      }
+    } catch (err: any) {
       console.error("Bulk unsubscribe failed:", err);
+      setActionError(
+        `${err?.message || "Bulk unsubscribe failed."} The list below reflects what was completed before the interruption.`
+      );
     } finally {
       setIsUnsubscribing(false);
+      setUnsubscribeProgress(null);
+      setIsUnsubscribeModalOpen(false);
+      setSelectedChannelIds(new Set());
+      // Always refresh: the server removes rows as it goes, so even an
+      // interrupted batch changed local state.
+      fetchCategories();
+      fetchChannels();
+    }
+
+    if (!summary) return;
+    const { succeeded, failed, quotaStopped } = summary;
+
+    if (quotaStopped) {
+      const remaining = selectedChannelIds.size - succeeded.length - failed.length;
+      setQuotaError({
+        message: `YouTube API quota limit reached. Unsubscribed ${succeeded.length} channel${
+          succeeded.length === 1 ? "" : "s"
+        }; ${remaining} channel${remaining === 1 ? "" : "s"} not attempted.`,
+        count: succeeded.length,
+      });
+    } else if (failed.length > 0) {
+      const firstReason = failed[0]?.reason ? ` First error: ${failed[0].reason}` : "";
+      setActionError(
+        `${failed.length} channel${failed.length === 1 ? "" : "s"} could not be unsubscribed (${succeeded.length} succeeded).${firstReason}`
+      );
+    } else if (succeeded.length > 0) {
+      setSuccessMessage(`Successfully unsubscribed from ${succeeded.length} channel${succeeded.length === 1 ? "" : "s"}.`);
     }
   };
 
@@ -306,8 +365,7 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
   const totalPages = Math.ceil(totalChannels / pageSize) || 1;
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-red-500 selection:text-white">
-      {/* TopBar Component */}
+    <div className="flex min-h-screen flex-col bg-background text-foreground">
       <TopBar
         searchQuery={searchQuery}
         onSearchChange={(q) => {
@@ -339,26 +397,34 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
         disconnecting={disconnecting}
       />
 
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-6xl w-full mx-auto p-6 md:p-8 space-y-6 pb-28">
+      <main className="mx-auto w-full max-w-6xl flex-1 space-y-6 p-4 pb-32 sm:p-6">
         {/* Quota Exceeded Warning Banner */}
         {quotaError && (
-          <div className="p-4 rounded-xl bg-amber-950/40 border border-amber-500/30 text-amber-200 flex items-start gap-3 shadow-lg">
-            <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+          <div className="flex items-start gap-3 rounded-lg border border-destructive/50 bg-destructive/10 p-4">
+            <AlertTriangle className="mt-0.5 size-5 shrink-0 text-destructive" />
             <div className="space-y-1 text-sm">
-              <h4 className="font-semibold text-amber-300">YouTube API Quota Reached</h4>
-              <p className="text-slate-300 text-xs leading-relaxed">
-                {quotaError.message} You can retry tomorrow when Google resets daily quota (~10,000 quota units / ~200 deletes per day).
+              <h4 className="font-semibold text-destructive">YouTube API quota reached</h4>
+              <p className="text-sm text-muted-foreground">
+                {quotaError.message} You can retry tomorrow when Google resets the daily quota (~10,000 units / ~200
+                deletes per day).
               </p>
             </div>
           </div>
         )}
 
-        {/* Sync Success Message */}
-        {syncSuccessMessage && !quotaError && (
-          <div className="p-4 rounded-xl bg-emerald-950/40 border border-emerald-500/30 text-emerald-200 flex items-center gap-3 shadow-md">
-            <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
-            <p className="text-sm font-medium">{syncSuccessMessage}</p>
+        {/* Action Error Banner */}
+        {actionError && (
+          <div className="flex items-start gap-3 rounded-lg border border-destructive/50 bg-destructive/10 p-4">
+            <AlertTriangle className="mt-0.5 size-5 shrink-0 text-destructive" />
+            <p className="text-sm text-destructive">{actionError}</p>
+          </div>
+        )}
+
+        {/* Success Message */}
+        {successMessage && !quotaError && !actionError && (
+          <div className="flex items-center gap-3 rounded-lg border bg-card p-4">
+            <CheckCircle2 className="size-5 shrink-0 text-chart-2" />
+            <p className="text-sm font-medium text-card-foreground">{successMessage}</p>
           </div>
         )}
 
@@ -375,7 +441,7 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
 
           {/* Pagination Controls */}
           {totalChannels > 0 && (
-            <div className="flex items-center justify-between flex-wrap gap-4 px-2 py-2 text-xs text-slate-400 font-mono">
+            <div className="flex flex-wrap items-center justify-between gap-4 text-sm text-muted-foreground">
               <div className="flex items-center gap-2">
                 <span>Show</span>
                 <select
@@ -384,14 +450,16 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
                     setPageSize(Number(e.target.value));
                     setPage(1);
                   }}
-                  className="bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 focus:outline-none"
+                  className="h-8 rounded-md border border-input bg-background px-2 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50"
                 >
                   <option value={10}>10</option>
                   <option value={20}>20</option>
                   <option value={50}>50</option>
                   <option value={100}>100</option>
                 </select>
-                <span>per page (Showing {channels.length} of {totalChannels})</span>
+                <span>
+                  per page &middot; showing {channels.length} of {totalChannels}
+                </span>
               </div>
 
               <div className="flex items-center gap-2">
@@ -399,13 +467,13 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
                   disabled={page <= 1 || isLoadingChannels}
                   variant="outline"
-                  size="sm"
-                  className="border-slate-800 bg-slate-900 hover:bg-slate-800 text-slate-300 h-8 px-2.5"
+                  size="icon-sm"
+                  aria-label="Previous page"
                 >
-                  <ChevronLeft className="w-4 h-4" />
+                  <ChevronLeft />
                 </Button>
 
-                <span>
+                <span className="tabular-nums">
                   Page {page} of {totalPages}
                 </span>
 
@@ -413,10 +481,10 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                   disabled={page >= totalPages || isLoadingChannels}
                   variant="outline"
-                  size="sm"
-                  className="border-slate-800 bg-slate-900 hover:bg-slate-800 text-slate-300 h-8 px-2.5"
+                  size="icon-sm"
+                  aria-label="Next page"
                 >
-                  <ChevronRight className="w-4 h-4" />
+                  <ChevronRight />
                 </Button>
               </div>
             </div>
@@ -450,6 +518,7 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
         onConfirm={handleBulkUnsubscribeConfirm}
         onCancel={() => setIsUnsubscribeModalOpen(false)}
         isUnsubscribing={isUnsubscribing}
+        progress={unsubscribeProgress}
       />
     </div>
   );

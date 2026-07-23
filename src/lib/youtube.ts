@@ -19,6 +19,21 @@ export function isQuotaExceededError(err: any): boolean {
   return msg.includes("quotaexceeded") || msg.includes("quota exceeded") || msg.includes("exceeded your quota");
 }
 
+/**
+ * True when YouTube reports the subscription no longer exists (e.g. the user
+ * already unsubscribed elsewhere). Callers should treat this as success and
+ * remove the local record so state converges with YouTube.
+ */
+export function isSubscriptionNotFoundError(err: any): boolean {
+  if (!err) return false;
+  if (err.code === 404 || err.status === 404) return true;
+  if (Array.isArray(err.errors) && err.errors.some((e: any) => e.reason === "subscriptionNotFound" || e.reason === "notFound")) {
+    return true;
+  }
+  const msg = String(err.message || "").toLowerCase();
+  return msg.includes("subscriptionnotfound") || msg.includes("not found");
+}
+
 export function mapSubscriptionToChannelRecord(item: any, syncTimestamp: string): ChannelRecord | null {
   const subscriptionId = item.id;
   const channelId = item.snippet?.resourceId?.channelId;
@@ -30,8 +45,10 @@ export function mapSubscriptionToChannelRecord(item: any, syncTimestamp: string)
 
   const description = item.snippet?.description || null;
   const thumbnails = item.snippet?.thumbnails;
+  // Prefer the smallest variant: these render as ~40px avatars, and decoding
+  // hundreds of 800px images is measurable CPU/memory load.
   const thumbnailUrl =
-    thumbnails?.high?.url || thumbnails?.medium?.url || thumbnails?.default?.url || null;
+    thumbnails?.default?.url || thumbnails?.medium?.url || thumbnails?.high?.url || null;
   const subscribedAt = item.snippet?.publishedAt || null;
 
   return {

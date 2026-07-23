@@ -7,6 +7,35 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+interface ProgressEvent {
+  type: "progress";
+  processed: number;
+  total: number;
+  channelId: string;
+  status: "ok" | "failed";
+  reason?: string;
+}
+
+interface DoneEvent {
+  type: "done";
+  succeeded: string[];
+  failed: { channelId: string; reason: string }[];
+  quotaStopped: boolean;
+}
+
+async function readNdjsonEvents(res: Response): Promise<{ progress: ProgressEvent[]; done: DoneEvent }> {
+  const text = await res.text();
+  const events = text
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line));
+
+  const progress = events.filter((e) => e.type === "progress") as ProgressEvent[];
+  const done = events.find((e) => e.type === "done") as DoneEvent | undefined;
+  if (!done) throw new Error("No 'done' event in NDJSON stream");
+  return { progress, done };
+}
+
 describe("POST /api/channels/unsubscribe HTTP API Seam", () => {
   let tempDir: string;
   let server: any;
@@ -125,7 +154,7 @@ describe("POST /api/channels/unsubscribe HTTP API Seam", () => {
     expect(res.status).toBe(400);
   });
 
-  test("unsubscribes specified channels, deletes rows from DB, and returns succeeded list", async () => {
+  test("unsubscribes specified channels, deletes rows from DB, and streams progress + done events", async () => {
     const res = await fetch(`http://127.0.0.1:${server.port}/api/channels/unsubscribe`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -133,10 +162,19 @@ describe("POST /api/channels/unsubscribe HTTP API Seam", () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.succeeded).toEqual(["UC1", "UC2"]);
-    expect(body.failed).toEqual([]);
-    expect(body.quotaStopped).toBe(false);
+    expect(res.headers.get("Content-Type")).toContain("application/x-ndjson");
+
+    const { progress, done } = await readNdjsonEvents(res);
+
+    // One progress event per channel with a running counter
+    expect(progress).toEqual([
+      { type: "progress", processed: 1, total: 2, channelId: "UC1", status: "ok" },
+      { type: "progress", processed: 2, total: 2, channelId: "UC2", status: "ok" },
+    ]);
+
+    expect(done.succeeded).toEqual(["UC1", "UC2"]);
+    expect(done.failed).toEqual([]);
+    expect(done.quotaStopped).toBe(false);
 
     // Verify YouTube API called with subscription resource IDs sub1, sub2
     expect(deleteCalls).toEqual(["sub1", "sub2"]);
@@ -151,7 +189,7 @@ describe("POST /api/channels/unsubscribe HTTP API Seam", () => {
     mockYoutubeClient.subscriptions.delete = async (params: { id: string }) => {
       deleteCalls.push(params.id);
       if (params.id === "sub1") {
-        throw new Error("Subscription not found (404)");
+        throw new Error("Internal backend error (500)");
       }
       return { status: 204 };
     };
@@ -163,14 +201,53 @@ describe("POST /api/channels/unsubscribe HTTP API Seam", () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.succeeded).toEqual(["UC2"]);
-    expect(body.failed).toEqual([{ channelId: "UC1", reason: "Subscription not found (404)" }]);
-    expect(body.quotaStopped).toBe(false);
+    const { progress, done } = await readNdjsonEvents(res);
+
+    expect(progress[0]).toEqual({
+      type: "progress",
+      processed: 1,
+      total: 2,
+      channelId: "UC1",
+      status: "failed",
+      reason: "Internal backend error (500)",
+    });
+
+    expect(done.succeeded).toEqual(["UC2"]);
+    expect(done.failed).toEqual([{ channelId: "UC1", reason: "Internal backend error (500)" }]);
+    expect(done.quotaStopped).toBe(false);
 
     // UC2 deleted from DB, UC1 still in DB (or UC3 also in DB)
     const dbState = getChannels(db, { page: 1, pageSize: 10 });
     expect(dbState.channels.map((c) => c.channel_id)).toEqual(["UC1", "UC3"]);
+  });
+
+  test("treats a 404 subscriptionNotFound as success and removes the stale local row", async () => {
+    mockYoutubeClient.subscriptions.delete = async (params: { id: string }) => {
+      deleteCalls.push(params.id);
+      if (params.id === "sub1") {
+        const err: any = new Error("Subscription not found.");
+        err.code = 404;
+        err.errors = [{ reason: "subscriptionNotFound", message: "Subscription not found." }];
+        throw err;
+      }
+      return { status: 204 };
+    };
+
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/channels/unsubscribe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channelIds: ["UC1", "UC2"], interCallDelayMs: 0 }),
+    });
+
+    expect(res.status).toBe(200);
+    const { done } = await readNdjsonEvents(res);
+
+    // Already gone on YouTube: local state converges instead of erroring
+    expect(done.succeeded).toEqual(["UC1", "UC2"]);
+    expect(done.failed).toEqual([]);
+
+    const dbState = getChannels(db, { page: 1, pageSize: 10 });
+    expect(dbState.channels.map((c) => c.channel_id)).toEqual(["UC3"]);
   });
 
   test("stops batch on quotaExceeded error, returns quotaStopped: true, and retains unattempted channels", async () => {
@@ -191,9 +268,9 @@ describe("POST /api/channels/unsubscribe HTTP API Seam", () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.succeeded).toEqual(["UC1"]);
-    expect(body.quotaStopped).toBe(true);
+    const { done } = await readNdjsonEvents(res);
+    expect(done.succeeded).toEqual(["UC1"]);
+    expect(done.quotaStopped).toBe(true);
 
     // Assert that delete was called for sub1 and sub2, but NOT sub3
     expect(deleteCalls).toEqual(["sub1", "sub2"]);
@@ -201,5 +278,28 @@ describe("POST /api/channels/unsubscribe HTTP API Seam", () => {
     // Assert UC1 deleted from DB, while UC2 and UC3 remain in DB
     const dbState = getChannels(db, { page: 1, pageSize: 10 });
     expect(dbState.channels.map((c) => c.channel_id)).toEqual(["UC2", "UC3"]);
+  });
+
+  test("succeeded channels are already removed from DB even when a later channel fails", async () => {
+    mockYoutubeClient.subscriptions.delete = async (params: { id: string }) => {
+      deleteCalls.push(params.id);
+      if (params.id === "sub3") {
+        throw new Error("Internal backend error (500)");
+      }
+      return { status: 204 };
+    };
+
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/channels/unsubscribe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channelIds: ["UC1", "UC2", "UC3"], interCallDelayMs: 0 }),
+    });
+
+    const { done } = await readNdjsonEvents(res);
+    expect(done.succeeded).toEqual(["UC1", "UC2"]);
+    expect(done.failed).toEqual([{ channelId: "UC3", reason: "Internal backend error (500)" }]);
+
+    const dbState = getChannels(db, { page: 1, pageSize: 10 });
+    expect(dbState.channels.map((c) => c.channel_id)).toEqual(["UC3"]);
   });
 });
