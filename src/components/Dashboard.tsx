@@ -213,27 +213,42 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
     });
   };
 
-  const handleToggleSelectAll = async () => {
-    const isAllSelected = totalChannels > 0 && selectedChannelIds.size === totalChannels;
+  const pageChannelIds = channels.map((c) => c.channel_id);
+  const isPageSelected =
+    pageChannelIds.length > 0 && pageChannelIds.every((id) => selectedChannelIds.has(id));
+  const isAllMatchingSelected = totalChannels > 0 && selectedChannelIds.size === totalChannels;
 
-    if (isAllSelected) {
-      // Clear all
-      setSelectedChannelIds(new Set());
-    } else {
-      // Fetch all matching channel IDs for current filter
-      try {
-        const params = new URLSearchParams();
-        if (debouncedSearch) params.set("q", debouncedSearch);
-        if (debouncedTag) params.set("tag", debouncedTag);
-        if (category) params.set("category", category);
-        params.set("allIdsOnly", "true");
-
-        const data = await fetchJson<{ channelIds: string[] }>(`/api/channels?${params.toString()}`);
-        setSelectedChannelIds(new Set(data.channelIds || []));
-      } catch {
-        // Fallback to selecting current page channels
-        setSelectedChannelIds(new Set(channels.map((c) => c.channel_id)));
+  // Table header checkbox: only the visible page.
+  const handleToggleSelectPage = () => {
+    setSelectedChannelIds((prev) => {
+      const next = new Set(prev);
+      if (isPageSelected) {
+        for (const id of pageChannelIds) next.delete(id);
+      } else {
+        for (const id of pageChannelIds) next.add(id);
       }
+      return next;
+    });
+  };
+
+  // Explicit "Select all matching" control: every channel for the current filter.
+  const handleToggleSelectAllMatching = async () => {
+    if (isAllMatchingSelected) {
+      setSelectedChannelIds(new Set());
+      return;
+    }
+
+    try {
+      const params = new URLSearchParams();
+      if (debouncedSearch) params.set("q", debouncedSearch);
+      if (debouncedTag) params.set("tag", debouncedTag);
+      if (category) params.set("category", category);
+      params.set("allIdsOnly", "true");
+
+      const data = await fetchJson<{ channelIds: string[] }>(`/api/channels?${params.toString()}`);
+      setSelectedChannelIds(new Set(data.channelIds || []));
+    } catch {
+      setSelectedChannelIds(new Set(pageChannelIds));
     }
   };
 
@@ -318,7 +333,6 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
     unsubscribeMutation.mutate(target.channelIds);
   };
 
-  const isAllSelected = totalChannels > 0 && selectedChannelIds.size === totalChannels;
   const totalPages = Math.ceil(totalChannels / pageSize) || 1;
   const isSyncing = syncMutation.isPending;
   const disconnecting = disconnectMutation.isPending;
@@ -414,8 +428,10 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
               channels={channels}
               selectedChannelIds={selectedChannelIds}
               onToggleSelectChannel={handleToggleSelectChannel}
-              onToggleSelectAll={handleToggleSelectAll}
-              isAllSelected={isAllSelected}
+              onToggleSelectPage={handleToggleSelectPage}
+              onToggleSelectAllMatching={handleToggleSelectAllMatching}
+              isPageSelected={isPageSelected}
+              isAllMatchingSelected={isAllMatchingSelected}
               totalChannels={totalChannels}
             />
 
