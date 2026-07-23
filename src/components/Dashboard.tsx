@@ -540,7 +540,16 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
           </TabsContent>
 
           <TabsContent value="activity">
-            <ActivityTab refreshKey={refreshKey} onDataChanged={bumpRefresh} />
+            <ActivityTab
+              refreshKey={refreshKey}
+              onDataChanged={() => {
+                // A redo may have resolved whatever an earlier banner reported.
+                setQuotaError(null);
+                setActionError(null);
+                setSuccessMessage(null);
+                bumpRefresh();
+              }}
+            />
           </TabsContent>
 
           <TabsContent value="export">
