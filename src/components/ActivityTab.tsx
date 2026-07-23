@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { History, Loader2, RotateCcw, Tag, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -83,6 +83,14 @@ export function ActivityTab({ onDataChanged }: ActivityTabProps) {
   });
   const jobs = jobsQuery.data?.jobs ?? [];
   const activeJobs = jobs.filter((job) => job.status !== "completed");
+  const previouslyActiveJobIds = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const current = new Set(activeJobs.map((job) => job.id));
+    const aJobCompleted = [...previouslyActiveJobIds.current].some((id) => !current.has(id));
+    previouslyActiveJobIds.current = current;
+    if (aJobCompleted) onDataChanged();
+  }, [jobs]);
 
   type RedoResult =
     | { kind: "job"; job: UnsubscribeJob }
