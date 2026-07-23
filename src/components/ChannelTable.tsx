@@ -6,8 +6,10 @@ interface ChannelTableProps {
   channels: ChannelRecord[];
   selectedChannelIds: Set<string>;
   onToggleSelectChannel: (channelId: string) => void;
-  onToggleSelectAll: () => void;
-  isAllSelected: boolean;
+  onToggleSelectPage: () => void;
+  onToggleSelectAllMatching: () => void;
+  isPageSelected: boolean;
+  isAllMatchingSelected: boolean;
   totalChannels: number;
 }
 
@@ -17,11 +19,13 @@ export function ChannelTable({
   channels,
   selectedChannelIds,
   onToggleSelectChannel,
-  onToggleSelectAll,
-  isAllSelected,
+  onToggleSelectPage,
+  onToggleSelectAllMatching,
+  isPageSelected,
+  isAllMatchingSelected,
   totalChannels,
 }: ChannelTableProps) {
-  const selectAllId = useId();
+  const selectAllMatchingId = useId();
 
   const formatDate = (dateStr: string | null) => {
     if (!dateStr) return "N/A";
@@ -64,14 +68,14 @@ export function ChannelTable({
 
   return (
     <div className="space-y-3">
-      {/* Table Selection Header */}
+      {/* Selection summary / select-all-matching */}
       <div className="flex items-center justify-between rounded-lg border bg-card px-4 py-2 text-sm">
-        <label htmlFor={selectAllId} className="flex cursor-pointer select-none items-center gap-2 font-medium">
+        <label htmlFor={selectAllMatchingId} className="flex cursor-pointer select-none items-center gap-2 font-medium">
           <input
-            id={selectAllId}
+            id={selectAllMatchingId}
             type="checkbox"
-            checked={isAllSelected}
-            onChange={onToggleSelectAll}
+            checked={isAllMatchingSelected}
+            onChange={onToggleSelectAllMatching}
             className={checkboxClassName}
           />
           <span>Select all matching ({totalChannels})</span>
@@ -90,9 +94,9 @@ export function ChannelTable({
                 <th className="w-12 px-4 py-3 text-center">
                   <input
                     type="checkbox"
-                    checked={isAllSelected}
-                    onChange={onToggleSelectAll}
-                    aria-label="Select all channels"
+                    checked={isPageSelected}
+                    onChange={onToggleSelectPage}
+                    aria-label="Select all channels on this page"
                     className={checkboxClassName}
                   />
                 </th>

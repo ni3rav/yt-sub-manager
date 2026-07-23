@@ -72,6 +72,24 @@ function createSchema(db: Database): void {
       created_at       TEXT NOT NULL
     );
   `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS unsubscribe_jobs (
+      id               TEXT PRIMARY KEY,
+      status           TEXT NOT NULL,
+      payload          TEXT NOT NULL,
+      total            INTEGER NOT NULL,
+      processed        INTEGER NOT NULL DEFAULT 0,
+      succeeded_count  INTEGER NOT NULL DEFAULT 0,
+      failed_count     INTEGER NOT NULL DEFAULT 0,
+      wait_reason      TEXT,
+      next_attempt_at  TEXT,
+      action_id        INTEGER,
+      created_at       TEXT NOT NULL,
+      updated_at       TEXT NOT NULL
+    );
+  `);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_unsubscribe_jobs_status ON unsubscribe_jobs (status, next_attempt_at);`);
 }
 
 export function upsertChannels(db: Database, channels: ChannelRecord[]): void {
@@ -401,6 +419,93 @@ export function getRecentActions(db: Database, limit = 20): ActionRecord[] {
 export function getActionById(db: Database, id: number): ActionRecord | null {
   const row = db.prepare("SELECT * FROM actions WHERE id = ?").get(id) as ActionRecord | undefined;
   return row ?? null;
+}
+
+export type UnsubscribeJobStatus = "queued" | "running" | "waiting" | "completed";
+
+export interface UnsubscribeJobRecord {
+  id: string;
+  status: UnsubscribeJobStatus;
+  payload: string;
+  total: number;
+  processed: number;
+  succeeded_count: number;
+  failed_count: number;
+  wait_reason: string | null;
+  next_attempt_at: string | null;
+  action_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateUnsubscribeJobInput {
+  id: string;
+  payload: Record<string, unknown>;
+  total: number;
+}
+
+export function createUnsubscribeJob(db: Database, input: CreateUnsubscribeJobInput): UnsubscribeJobRecord {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO unsubscribe_jobs (
+       id, status, payload, total, processed, succeeded_count, failed_count,
+       wait_reason, next_attempt_at, action_id, created_at, updated_at
+     ) VALUES (?, 'queued', ?, ?, 0, 0, 0, NULL, NULL, NULL, ?, ?)`
+  ).run(input.id, JSON.stringify(input.payload), input.total, now, now);
+  return getUnsubscribeJob(db, input.id)!;
+}
+
+export function getUnsubscribeJob(db: Database, id: string): UnsubscribeJobRecord | null {
+  const row = db.prepare("SELECT * FROM unsubscribe_jobs WHERE id = ?").get(id) as
+    | UnsubscribeJobRecord
+    | undefined;
+  return row ?? null;
+}
+
+export function getRunnableUnsubscribeJob(db: Database, nowIso: string): UnsubscribeJobRecord | null {
+  const row = db
+    .prepare(
+      `SELECT * FROM unsubscribe_jobs
+       WHERE status IN ('queued', 'running')
+          OR (status = 'waiting' AND next_attempt_at <= ?)
+       ORDER BY created_at ASC
+       LIMIT 1`
+    )
+    .get(nowIso) as UnsubscribeJobRecord | undefined;
+  return row ?? null;
+}
+
+export function getRecentUnsubscribeJobs(db: Database, limit = 20): UnsubscribeJobRecord[] {
+  return db
+    .prepare("SELECT * FROM unsubscribe_jobs ORDER BY created_at DESC LIMIT ?")
+    .all(limit) as UnsubscribeJobRecord[];
+}
+
+export function saveUnsubscribeJob(db: Database, job: UnsubscribeJobRecord): void {
+  db.prepare(
+    `UPDATE unsubscribe_jobs SET
+       status = ?,
+       payload = ?,
+       processed = ?,
+       succeeded_count = ?,
+       failed_count = ?,
+       wait_reason = ?,
+       next_attempt_at = ?,
+       action_id = ?,
+       updated_at = ?
+     WHERE id = ?`
+  ).run(
+    job.status,
+    job.payload,
+    job.processed,
+    job.succeeded_count,
+    job.failed_count,
+    job.wait_reason,
+    job.next_attempt_at,
+    job.action_id,
+    job.updated_at,
+    job.id
+  );
 }
 
 export function deleteChannels(db: Database, channelIds: string[]): number {

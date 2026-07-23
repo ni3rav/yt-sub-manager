@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { History, Loader2, RotateCcw, Tag, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { readActionStream, type StreamProgress, type StreamSummary } from "@/lib/actionStream";
-import { fetchJson, UnauthorizedError } from "@/lib/api";
+import { readActionStream, type StreamSummary } from "@/lib/actionStream";
+import { fetchJson, UnauthorizedError, type UnsubscribeJob } from "@/lib/api";
 
 export interface ActionEntry {
   id: number;
@@ -67,7 +67,6 @@ function summarizeRedo(summary: StreamSummary): string {
 
 export function ActivityTab({ onDataChanged }: ActivityTabProps) {
   const [confirmingId, setConfirmingId] = useState<number | null>(null);
-  const [redoProgress, setRedoProgress] = useState<StreamProgress | null>(null);
   const [redoResult, setRedoResult] = useState<{ id: number; message: string; isError: boolean } | null>(null);
 
   const actionsQuery = useQuery({
@@ -76,40 +75,92 @@ export function ActivityTab({ onDataChanged }: ActivityTabProps) {
   });
   const actions = actionsQuery.data?.actions ?? [];
 
+  const jobsQuery = useQuery({
+    queryKey: ["unsubscribeJobs"],
+    queryFn: () => fetchJson<{ jobs: UnsubscribeJob[] }>("/api/unsubscribe/jobs"),
+    refetchInterval: (query) =>
+      query.state.data?.jobs.some((job) => job.status !== "completed") ? 500 : false,
+  });
+  const jobs = jobsQuery.data?.jobs ?? [];
+  const activeJobs = jobs.filter((job) => job.status !== "completed");
+  const previouslyActiveJobIds = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const current = new Set(activeJobs.map((job) => job.id));
+    const aJobCompleted = [...previouslyActiveJobIds.current].some((id) => !current.has(id));
+    previouslyActiveJobIds.current = current;
+    if (aJobCompleted) onDataChanged();
+  }, [jobs]);
+
+  type RedoResult =
+    | { kind: "job"; job: UnsubscribeJob }
+    | { kind: "immediate"; summary: StreamSummary };
+
   const redoMutation = useMutation({
-    mutationFn: async (action: ActionEntry): Promise<StreamSummary> => {
+    mutationFn: async (action: ActionEntry): Promise<RedoResult> => {
       const res = await fetch(`/api/actions/${action.id}/redo`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
       if (res.status === 401) throw new UnauthorizedError();
-      return readActionStream(res, setRedoProgress);
+      if (res.headers.get("Content-Type")?.includes("application/json")) {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `Request failed (HTTP ${res.status}).`);
+        return { kind: "job", job: data.job };
+      }
+      return { kind: "immediate", summary: await readActionStream(res, () => {}) };
     },
     onMutate: () => {
       setConfirmingId(null);
-      setRedoProgress(null);
       setRedoResult(null);
     },
-    onSuccess: (summary, action) => {
+    onSuccess: (result, action) => {
+      if (result.kind === "job") {
+        // Start polling immediately instead of waiting for the list interval.
+        jobsQuery.refetch();
+        return;
+      }
       setRedoResult({
         id: action.id,
-        message: summarizeRedo(summary),
-        isError: summary.failed.length > 0 || summary.quotaStopped,
+        message: summarizeRedo(result.summary),
+        isError: result.summary.failed.length > 0 || result.summary.quotaStopped,
       });
+      onDataChanged();
     },
     onError: (err, action) => {
       if (err instanceof UnauthorizedError) return;
       console.error("Redo failed:", err);
       setRedoResult({ id: action.id, message: err.message || "Redo failed.", isError: true });
     },
-    onSettled: () => {
-      setRedoProgress(null);
-      onDataChanged();
-    },
   });
 
-  const redoingId = redoMutation.isPending ? redoMutation.variables?.id : null;
+  const redoData = redoMutation.data;
+  const trackedJob =
+    redoData?.kind === "job"
+      ? jobs.find((job) => job.id === redoData.job.id) ?? redoData.job
+      : null;
+  const redoingId =
+    redoMutation.isPending || (trackedJob && trackedJob.status !== "completed")
+      ? redoMutation.variables?.id ?? null
+      : null;
+
+  useEffect(() => {
+    if (!trackedJob || trackedJob.status !== "completed" || !redoMutation.variables) return;
+    const summary: StreamSummary = {
+      succeeded: trackedJob.succeeded,
+      failed: trackedJob.failed,
+      quotaStopped: false,
+      skipped: Array.from({ length: trackedJob.skippedCount }, () => ""),
+    };
+    setRedoResult({
+      id: redoMutation.variables.id,
+      message: summarizeRedo(summary),
+      isError: trackedJob.failedCount > 0,
+    });
+    redoMutation.reset();
+    onDataChanged();
+  }, [trackedJob?.id, trackedJob?.status]);
 
   if (actionsQuery.isPending) {
     return (
@@ -120,7 +171,7 @@ export function ActivityTab({ onDataChanged }: ActivityTabProps) {
     );
   }
 
-  if (actions.length === 0) {
+  if (actions.length === 0 && activeJobs.length === 0) {
     return (
       <div className="space-y-3 rounded-xl border bg-card p-12 text-center">
         <History className="mx-auto size-12 text-muted-foreground" />
@@ -133,7 +184,51 @@ export function ActivityTab({ onDataChanged }: ActivityTabProps) {
   }
 
   return (
-    <div className="overflow-hidden rounded-xl border bg-card shadow-sm">
+    <div className="space-y-4">
+      {activeJobs.length > 0 && (
+        <div className="overflow-hidden rounded-xl border bg-card shadow-sm">
+          <div className="border-b bg-muted/50 px-4 py-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Background queue ({activeJobs.length})
+          </div>
+          <ul className="divide-y">
+            {activeJobs.map((job) => {
+              const percent = job.total > 0 ? Math.round((job.processed / job.total) * 100) : 0;
+              const status =
+                job.waitReason === "daily_quota"
+                  ? "Paused until the daily quota resets"
+                  : job.waitReason === "rate_limit"
+                    ? "Rate limited — retrying with backoff"
+                    : job.status === "queued"
+                      ? "Queued"
+                      : "Running";
+              return (
+                <li key={job.id} className="space-y-2 px-4 py-3">
+                  <div className="flex items-center justify-between gap-3 text-sm">
+                    <span className="font-medium">
+                      Unsubscribing {job.total} channel{job.total === 1 ? "" : "s"}
+                    </span>
+                    <span className="text-muted-foreground">
+                      {job.processed} of {job.total}
+                    </span>
+                  </div>
+                  <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                    <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${percent}%` }} />
+                  </div>
+                  <p className={job.waitReason === "daily_quota" ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>
+                    {status}
+                    {job.nextAttemptAt && job.waitReason !== "pacing"
+                      ? ` · next attempt ${new Date(job.nextAttemptAt).toLocaleString()}`
+                      : ""}
+                  </p>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+
+      {actions.length > 0 && (
+      <div className="overflow-hidden rounded-xl border bg-card shadow-sm">
       <div className="border-b bg-muted/50 px-4 py-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
         Recent actions ({actions.length})
       </div>
@@ -143,9 +238,10 @@ export function ActivityTab({ onDataChanged }: ActivityTabProps) {
           const isConfirming = confirmingId === action.id;
           const result = redoResult?.id === action.id ? redoResult : null;
           const titles = previewTitles(action);
+          const progressJob = isRedoing ? trackedJob : null;
           const percent =
-            isRedoing && redoProgress && redoProgress.total > 0
-              ? Math.round((redoProgress.processed / redoProgress.total) * 100)
+            progressJob && progressJob.total > 0
+              ? Math.round((progressJob.processed / progressJob.total) * 100)
               : 0;
 
           return (
@@ -217,7 +313,7 @@ export function ActivityTab({ onDataChanged }: ActivityTabProps) {
               {isRedoing && (
                 <div className="space-y-1 pl-11">
                   <p className="text-xs text-muted-foreground">
-                    Redoing&hellip; {redoProgress ? `${redoProgress.processed} of ${redoProgress.total}` : "starting"}
+                    Redoing&hellip; {progressJob ? `${progressJob.processed} of ${progressJob.total}` : "starting"}
                   </p>
                   <div className="h-1.5 w-full max-w-sm overflow-hidden rounded-full bg-muted">
                     <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${percent}%` }} />
@@ -234,6 +330,8 @@ export function ActivityTab({ onDataChanged }: ActivityTabProps) {
           );
         })}
       </ul>
+    </div>
+      )}
     </div>
   );
 }

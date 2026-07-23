@@ -19,6 +19,42 @@ export function isQuotaExceededError(err: any): boolean {
   return msg.includes("quotaexceeded") || msg.includes("quota exceeded") || msg.includes("exceeded your quota");
 }
 
+const TRANSIENT_REASONS = new Set([
+  "rateLimitExceeded",
+  "userRateLimitExceeded",
+  "backendError",
+  "internalError",
+]);
+
+/**
+ * Errors that may recover without changing the request. Quota exhaustion is
+ * deliberately excluded: it needs a pause until quota resets, not hot retries.
+ */
+export function isTransientYouTubeError(err: any): boolean {
+  if (!err || isQuotaExceededError(err)) return false;
+  const status = Number(err.code ?? err.status ?? err.response?.status);
+  if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
+    return true;
+  }
+  return Array.isArray(err.errors) && err.errors.some((e: any) => TRANSIENT_REASONS.has(e.reason));
+}
+
+/** Parse an optional HTTP Retry-After header into milliseconds. */
+export function getRetryAfterMs(err: any, nowMs = Date.now()): number | null {
+  const headers = err?.response?.headers;
+  const raw =
+    typeof headers?.get === "function"
+      ? headers.get("retry-after")
+      : headers?.["retry-after"] ?? headers?.["Retry-After"];
+  if (raw === undefined || raw === null || raw === "") return null;
+
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
+
+  const dateMs = Date.parse(String(raw));
+  return Number.isFinite(dateMs) ? Math.max(0, dateMs - nowMs) : null;
+}
+
 /**
  * True when YouTube reports the subscription no longer exists (e.g. the user
  * already unsubscribed elsewhere). Callers should treat this as success and

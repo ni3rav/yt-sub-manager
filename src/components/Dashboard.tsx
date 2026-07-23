@@ -10,8 +10,14 @@ import { ActivityTab } from "./ActivityTab";
 import { ExportControls } from "./ExportControls";
 import { UnsubscribeConfirmModal } from "./UnsubscribeConfirmModal";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { readActionStream, type StreamProgress, type StreamSummary } from "@/lib/actionStream";
-import { fetchJson, postJson, categoriesQueryOptions, syncStatusQueryOptions, UnauthorizedError } from "@/lib/api";
+import {
+  fetchJson,
+  postJson,
+  categoriesQueryOptions,
+  syncStatusQueryOptions,
+  UnauthorizedError,
+  type UnsubscribeJob,
+} from "@/lib/api";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -28,7 +34,10 @@ interface DashboardProps {
   onDisconnect: () => void;
 }
 
-export type UnsubscribeProgress = StreamProgress;
+export interface UnsubscribeProgress {
+  processed: number;
+  total: number;
+}
 
 interface UnsubscribeTarget {
   channelIds: string[];
@@ -128,6 +137,7 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
     queryClient.invalidateQueries({ queryKey: ["channels"] });
     queryClient.invalidateQueries({ queryKey: ["categories"] });
     queryClient.invalidateQueries({ queryKey: ["actions"] });
+    queryClient.invalidateQueries({ queryKey: ["unsubscribeJobs"] });
   };
 
   // Mutations
@@ -203,82 +213,90 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
     });
   };
 
-  const handleToggleSelectAll = async () => {
-    const isAllSelected = totalChannels > 0 && selectedChannelIds.size === totalChannels;
+  const pageChannelIds = channels.map((c) => c.channel_id);
+  const isPageSelected =
+    pageChannelIds.length > 0 && pageChannelIds.every((id) => selectedChannelIds.has(id));
+  const isAllMatchingSelected = totalChannels > 0 && selectedChannelIds.size === totalChannels;
 
-    if (isAllSelected) {
-      // Clear all
-      setSelectedChannelIds(new Set());
-    } else {
-      // Fetch all matching channel IDs for current filter
-      try {
-        const params = new URLSearchParams();
-        if (debouncedSearch) params.set("q", debouncedSearch);
-        if (debouncedTag) params.set("tag", debouncedTag);
-        if (category) params.set("category", category);
-        params.set("allIdsOnly", "true");
-
-        const data = await fetchJson<{ channelIds: string[] }>(`/api/channels?${params.toString()}`);
-        setSelectedChannelIds(new Set(data.channelIds || []));
-      } catch {
-        // Fallback to selecting current page channels
-        setSelectedChannelIds(new Set(channels.map((c) => c.channel_id)));
+  // Table header checkbox: only the visible page.
+  const handleToggleSelectPage = () => {
+    setSelectedChannelIds((prev) => {
+      const next = new Set(prev);
+      if (isPageSelected) {
+        for (const id of pageChannelIds) next.delete(id);
+      } else {
+        for (const id of pageChannelIds) next.add(id);
       }
+      return next;
+    });
+  };
+
+  // Explicit "Select all matching" control: every channel for the current filter.
+  const handleToggleSelectAllMatching = async () => {
+    if (isAllMatchingSelected) {
+      setSelectedChannelIds(new Set());
+      return;
+    }
+
+    try {
+      const params = new URLSearchParams();
+      if (debouncedSearch) params.set("q", debouncedSearch);
+      if (debouncedTag) params.set("tag", debouncedTag);
+      if (category) params.set("category", category);
+      params.set("allIdsOnly", "true");
+
+      const data = await fetchJson<{ channelIds: string[] }>(`/api/channels?${params.toString()}`);
+      setSelectedChannelIds(new Set(data.channelIds || []));
+    } catch {
+      setSelectedChannelIds(new Set(pageChannelIds));
     }
   };
 
   // Unsubscribe State (driven by a target: current selection or a whole category)
   const [unsubscribeTarget, setUnsubscribeTarget] = useState<UnsubscribeTarget | null>(null);
-  const [unsubscribeProgress, setUnsubscribeProgress] = useState<StreamProgress | null>(null);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
 
   const unsubscribeMutation = useMutation({
-    mutationFn: async (channelIds: string[]): Promise<StreamSummary> => {
-      const res = await fetch("/api/channels/unsubscribe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channelIds }),
-      });
-      if (res.status === 401) throw new UnauthorizedError();
-      return readActionStream(res, setUnsubscribeProgress);
-    },
-    onMutate: (channelIds) => {
+    mutationFn: (channelIds: string[]) =>
+      postJson<{ job: UnsubscribeJob }>("/api/channels/unsubscribe", { channelIds }),
+    onMutate: () => {
       clearBanners();
-      setUnsubscribeProgress({ processed: 0, total: channelIds.length });
     },
-    onSuccess: ({ succeeded, failed, quotaStopped }, channelIds) => {
-      if (quotaStopped) {
-        const remaining = channelIds.length - succeeded.length - failed.length;
-        setQuotaError({
-          message: `YouTube API quota limit reached. Unsubscribed ${succeeded.length} channel${
-            succeeded.length === 1 ? "" : "s"
-          }; ${remaining} channel${remaining === 1 ? "" : "s"} not attempted. You can redo this action from the Activity tab tomorrow.`,
-          count: succeeded.length,
-        });
-      } else if (failed.length > 0) {
-        const firstReason = failed[0]?.reason ? ` First error: ${failed[0].reason}` : "";
-        setActionError(
-          `${failed.length} channel${failed.length === 1 ? "" : "s"} could not be unsubscribed (${succeeded.length} succeeded).${firstReason} You can redo this action from the Activity tab.`
-        );
-      } else if (succeeded.length > 0) {
-        setSuccessMessage(`Successfully unsubscribed from ${succeeded.length} channel${succeeded.length === 1 ? "" : "s"}.`);
-      }
-    },
+    onSuccess: ({ job }) => setActiveJobId(job.id),
     onError: (err) => {
       if (err instanceof UnauthorizedError) return;
-      console.error("Bulk unsubscribe failed:", err);
-      setActionError(
-        `${err.message || "Bulk unsubscribe failed."} Progress up to the interruption was saved; check the Activity tab to redo the remainder.`
-      );
-    },
-    onSettled: () => {
-      setUnsubscribeProgress(null);
-      setUnsubscribeTarget(null);
-      setSelectedChannelIds(new Set());
-      // Always refresh: the server removes rows as it goes, so even an
-      // interrupted batch changed local state.
-      invalidateChannelData();
+      console.error("Failed to enqueue bulk unsubscribe:", err);
+      setActionError(err.message || "Failed to queue the unsubscribe operation.");
     },
   });
+
+  const activeJobQuery = useQuery({
+    queryKey: ["unsubscribeJob", activeJobId],
+    queryFn: () => fetchJson<{ job: UnsubscribeJob }>(`/api/unsubscribe/jobs/${activeJobId}`),
+    enabled: activeJobId !== null,
+    refetchInterval: (query) => (query.state.data?.job.status === "completed" ? false : 500),
+  });
+  const activeJob = activeJobQuery.data?.job ?? null;
+
+  useEffect(() => {
+    if (!activeJob || activeJob.status !== "completed") return;
+
+    if (activeJob.failed.length > 0) {
+      const firstReason = activeJob.failed[0]?.reason ? ` First error: ${activeJob.failed[0].reason}` : "";
+      setActionError(
+        `${activeJob.failed.length} channel${activeJob.failed.length === 1 ? "" : "s"} could not be unsubscribed (${activeJob.succeededCount} succeeded).${firstReason} You can redo this action from the Activity tab.`
+      );
+    } else if (activeJob.succeededCount > 0) {
+      setSuccessMessage(
+        `Successfully unsubscribed from ${activeJob.succeededCount} channel${activeJob.succeededCount === 1 ? "" : "s"}.`
+      );
+    }
+
+    setActiveJobId(null);
+    setUnsubscribeTarget(null);
+    setSelectedChannelIds(new Set());
+    invalidateChannelData();
+  }, [activeJob?.id, activeJob?.status]);
 
   const handleOpenSelectionUnsubscribe = () => {
     const preview = channels
@@ -315,7 +333,6 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
     unsubscribeMutation.mutate(target.channelIds);
   };
 
-  const isAllSelected = totalChannels > 0 && selectedChannelIds.size === totalChannels;
   const totalPages = Math.ceil(totalChannels / pageSize) || 1;
   const isSyncing = syncMutation.isPending;
   const disconnecting = disconnectMutation.isPending;
@@ -411,8 +428,10 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
               channels={channels}
               selectedChannelIds={selectedChannelIds}
               onToggleSelectChannel={handleToggleSelectChannel}
-              onToggleSelectAll={handleToggleSelectAll}
-              isAllSelected={isAllSelected}
+              onToggleSelectPage={handleToggleSelectPage}
+              onToggleSelectAllMatching={handleToggleSelectAllMatching}
+              isPageSelected={isPageSelected}
+              isAllMatchingSelected={isAllMatchingSelected}
               totalChannels={totalChannels}
             />
 
@@ -520,10 +539,23 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
         targetLabel={unsubscribeTarget?.label}
         onConfirm={handleUnsubscribeConfirm}
         onCancel={() => {
-          if (!unsubscribeMutation.isPending) setUnsubscribeTarget(null);
+          // The durable worker continues even when the modal is dismissed.
+          setUnsubscribeTarget(null);
+          setActiveJobId(null);
+          queryClient.invalidateQueries({ queryKey: ["unsubscribeJobs"] });
         }}
-        isUnsubscribing={unsubscribeMutation.isPending}
-        progress={unsubscribeProgress}
+        isUnsubscribing={
+          unsubscribeMutation.isPending || (activeJob !== null && activeJob.status !== "completed")
+        }
+        progress={
+          activeJob
+            ? { processed: activeJob.processed, total: activeJob.total }
+            : unsubscribeMutation.isPending && unsubscribeTarget
+              ? { processed: 0, total: unsubscribeTarget.channelIds.length }
+              : null
+        }
+        waitReason={activeJob?.waitReason ?? null}
+        nextAttemptAt={activeJob?.nextAttemptAt ?? null}
       />
     </div>
   );

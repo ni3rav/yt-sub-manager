@@ -7,33 +7,44 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-interface ProgressEvent {
-  type: "progress";
-  processed: number;
+interface UnsubscribeJob {
+  id: string;
+  status: "queued" | "running" | "waiting" | "completed";
   total: number;
-  channelId: string;
-  status: "ok" | "failed";
-  reason?: string;
-}
-
-interface DoneEvent {
-  type: "done";
+  processed: number;
   succeeded: string[];
   failed: { channelId: string; reason: string }[];
-  quotaStopped: boolean;
+  waitReason: string | null;
 }
 
-async function readNdjsonEvents(res: Response): Promise<{ progress: ProgressEvent[]; done: DoneEvent }> {
-  const text = await res.text();
-  const events = text
-    .split("\n")
-    .filter((line) => line.trim() !== "")
-    .map((line) => JSON.parse(line));
+async function waitForJob(
+  baseUrl: string,
+  id: string,
+  predicate: (job: UnsubscribeJob) => boolean = (job) => job.status === "completed"
+): Promise<UnsubscribeJob> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const res = await fetch(`${baseUrl}/api/unsubscribe/jobs/${id}`);
+    const { job } = await res.json();
+    if (predicate(job)) return job;
+    await Bun.sleep(1);
+  }
+  throw new Error(`Timed out waiting for unsubscribe job ${id}`);
+}
 
-  const progress = events.filter((e) => e.type === "progress") as ProgressEvent[];
-  const done = events.find((e) => e.type === "done") as DoneEvent | undefined;
-  if (!done) throw new Error("No 'done' event in NDJSON stream");
-  return { progress, done };
+async function enqueueAndWait(
+  baseUrl: string,
+  channelIds: string[],
+  extra: Record<string, unknown> = {}
+): Promise<UnsubscribeJob> {
+  const res = await fetch(`${baseUrl}/api/channels/unsubscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ channelIds, interCallDelayMs: 0, retryBaseDelayMs: 0, ...extra }),
+  });
+  expect(res.status).toBe(202);
+  const { job } = await res.json();
+  return waitForJob(baseUrl, job.id);
 }
 
 describe("POST /api/channels/unsubscribe HTTP API Seam", () => {
@@ -154,27 +165,13 @@ describe("POST /api/channels/unsubscribe HTTP API Seam", () => {
     expect(res.status).toBe(400);
   });
 
-  test("unsubscribes specified channels, deletes rows from DB, and streams progress + done events", async () => {
-    const res = await fetch(`http://127.0.0.1:${server.port}/api/channels/unsubscribe`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channelIds: ["UC1", "UC2"], interCallDelayMs: 0 }),
-    });
+  test("queues specified channels, deletes rows from DB in the background, and reports progress", async () => {
+    const job = await enqueueAndWait(`http://127.0.0.1:${server.port}`, ["UC1", "UC2"]);
 
-    expect(res.status).toBe(200);
-    expect(res.headers.get("Content-Type")).toContain("application/x-ndjson");
-
-    const { progress, done } = await readNdjsonEvents(res);
-
-    // One progress event per channel with a running counter
-    expect(progress).toEqual([
-      { type: "progress", processed: 1, total: 2, channelId: "UC1", status: "ok" },
-      { type: "progress", processed: 2, total: 2, channelId: "UC2", status: "ok" },
-    ]);
-
-    expect(done.succeeded).toEqual(["UC1", "UC2"]);
-    expect(done.failed).toEqual([]);
-    expect(done.quotaStopped).toBe(false);
+    expect(job.status).toBe("completed");
+    expect(job.processed).toBe(2);
+    expect(job.succeeded).toEqual(["UC1", "UC2"]);
+    expect(job.failed).toEqual([]);
 
     // Verify YouTube API called with subscription resource IDs sub1, sub2
     expect(deleteCalls).toEqual(["sub1", "sub2"]);
@@ -194,31 +191,36 @@ describe("POST /api/channels/unsubscribe HTTP API Seam", () => {
       return { status: 204 };
     };
 
-    const res = await fetch(`http://127.0.0.1:${server.port}/api/channels/unsubscribe`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channelIds: ["UC1", "UC2"], interCallDelayMs: 0 }),
-    });
-
-    expect(res.status).toBe(200);
-    const { progress, done } = await readNdjsonEvents(res);
-
-    expect(progress[0]).toEqual({
-      type: "progress",
-      processed: 1,
-      total: 2,
-      channelId: "UC1",
-      status: "failed",
-      reason: "Internal backend error (500)",
-    });
-
-    expect(done.succeeded).toEqual(["UC2"]);
-    expect(done.failed).toEqual([{ channelId: "UC1", reason: "Internal backend error (500)" }]);
-    expect(done.quotaStopped).toBe(false);
+    const job = await enqueueAndWait(`http://127.0.0.1:${server.port}`, ["UC1", "UC2"]);
+    expect(job.succeeded).toEqual(["UC2"]);
+    expect(job.failed).toEqual([{ channelId: "UC1", reason: "Internal backend error (500)" }]);
 
     // UC2 deleted from DB, UC1 still in DB (or UC3 also in DB)
     const dbState = getChannels(db, { page: 1, pageSize: 10 });
     expect(dbState.channels.map((c) => c.channel_id)).toEqual(["UC1", "UC3"]);
+  });
+
+  test("retries a transient rateLimitExceeded response instead of permanently failing the channel", async () => {
+    let attempts = 0;
+    mockYoutubeClient.subscriptions.delete = async (params: { id: string }) => {
+      deleteCalls.push(params.id);
+      attempts++;
+      if (attempts === 1) {
+        const err: any = new Error("Rate limit exceeded.");
+        err.code = 403;
+        err.errors = [{ reason: "rateLimitExceeded", message: "Rate limit exceeded." }];
+        throw err;
+      }
+      return { status: 204 };
+    };
+
+    const job = await enqueueAndWait(`http://127.0.0.1:${server.port}`, ["UC1"]);
+    expect(job.succeeded).toEqual(["UC1"]);
+    expect(job.failed).toEqual([]);
+    expect(deleteCalls).toEqual(["sub1", "sub1"]);
+
+    const dbState = getChannels(db, { page: 1, pageSize: 10 });
+    expect(dbState.channels.map((c) => c.channel_id)).toEqual(["UC2", "UC3"]);
   });
 
   test("treats a 404 subscriptionNotFound as success and removes the stale local row", async () => {
@@ -233,24 +235,17 @@ describe("POST /api/channels/unsubscribe HTTP API Seam", () => {
       return { status: 204 };
     };
 
-    const res = await fetch(`http://127.0.0.1:${server.port}/api/channels/unsubscribe`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channelIds: ["UC1", "UC2"], interCallDelayMs: 0 }),
-    });
-
-    expect(res.status).toBe(200);
-    const { done } = await readNdjsonEvents(res);
+    const job = await enqueueAndWait(`http://127.0.0.1:${server.port}`, ["UC1", "UC2"]);
 
     // Already gone on YouTube: local state converges instead of erroring
-    expect(done.succeeded).toEqual(["UC1", "UC2"]);
-    expect(done.failed).toEqual([]);
+    expect(job.succeeded).toEqual(["UC1", "UC2"]);
+    expect(job.failed).toEqual([]);
 
     const dbState = getChannels(db, { page: 1, pageSize: 10 });
     expect(dbState.channels.map((c) => c.channel_id)).toEqual(["UC3"]);
   });
 
-  test("stops batch on quotaExceeded error, returns quotaStopped: true, and retains unattempted channels", async () => {
+  test("pauses the durable job on quotaExceeded and retains unattempted channels", async () => {
     mockYoutubeClient.subscriptions.delete = async (params: { id: string }) => {
       deleteCalls.push(params.id);
       if (params.id === "sub2") {
@@ -261,16 +256,22 @@ describe("POST /api/channels/unsubscribe HTTP API Seam", () => {
       return { status: 204 };
     };
 
-    const res = await fetch(`http://127.0.0.1:${server.port}/api/channels/unsubscribe`, {
+    const baseUrl = `http://127.0.0.1:${server.port}`;
+    const res = await fetch(`${baseUrl}/api/channels/unsubscribe`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ channelIds: ["UC1", "UC2", "UC3"], interCallDelayMs: 0 }),
     });
 
-    expect(res.status).toBe(200);
-    const { done } = await readNdjsonEvents(res);
-    expect(done.succeeded).toEqual(["UC1"]);
-    expect(done.quotaStopped).toBe(true);
+    expect(res.status).toBe(202);
+    const { job: queuedJob } = await res.json();
+    const job = await waitForJob(
+      baseUrl,
+      queuedJob.id,
+      (candidate) => candidate.status === "waiting" && candidate.waitReason === "daily_quota"
+    );
+    expect(job.succeeded).toEqual(["UC1"]);
+    expect(job.waitReason).toBe("daily_quota");
 
     // Assert that delete was called for sub1 and sub2, but NOT sub3
     expect(deleteCalls).toEqual(["sub1", "sub2"]);
@@ -289,15 +290,9 @@ describe("POST /api/channels/unsubscribe HTTP API Seam", () => {
       return { status: 204 };
     };
 
-    const res = await fetch(`http://127.0.0.1:${server.port}/api/channels/unsubscribe`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channelIds: ["UC1", "UC2", "UC3"], interCallDelayMs: 0 }),
-    });
-
-    const { done } = await readNdjsonEvents(res);
-    expect(done.succeeded).toEqual(["UC1", "UC2"]);
-    expect(done.failed).toEqual([{ channelId: "UC3", reason: "Internal backend error (500)" }]);
+    const job = await enqueueAndWait(`http://127.0.0.1:${server.port}`, ["UC1", "UC2", "UC3"]);
+    expect(job.succeeded).toEqual(["UC1", "UC2"]);
+    expect(job.failed).toEqual([{ channelId: "UC3", reason: "Internal backend error (500)" }]);
 
     const dbState = getChannels(db, { page: 1, pageSize: 10 });
     expect(dbState.channels.map((c) => c.channel_id)).toEqual(["UC3"]);
