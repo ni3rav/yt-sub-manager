@@ -59,6 +59,19 @@ function createSchema(db: Database): void {
   db.run(`CREATE INDEX IF NOT EXISTS idx_channels_title ON channels (title);`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_channels_subscribed ON channels (subscribed_at);`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_channels_category ON channels (category);`);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS actions (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      type             TEXT NOT NULL,
+      payload          TEXT NOT NULL DEFAULT '{}',
+      total            INTEGER NOT NULL DEFAULT 0,
+      succeeded_count  INTEGER NOT NULL DEFAULT 0,
+      failed_count     INTEGER NOT NULL DEFAULT 0,
+      quota_stopped    INTEGER NOT NULL DEFAULT 0,
+      created_at       TEXT NOT NULL
+    );
+  `);
 }
 
 export function upsertChannels(db: Database, channels: ChannelRecord[]): void {
@@ -224,6 +237,23 @@ export function getDistinctCategories(db: Database): string[] {
   return rows.map((r) => r.category);
 }
 
+export interface CategoryStat {
+  category: string;
+  channelCount: number;
+}
+
+export function getCategoryStats(db: Database): CategoryStat[] {
+  return db
+    .prepare(
+      `SELECT category, COUNT(*) as channelCount
+       FROM channels
+       WHERE category IS NOT NULL AND category != ''
+       GROUP BY category
+       ORDER BY category ASC`
+    )
+    .all() as CategoryStat[];
+}
+
 export function getChannelsStats(db: Database): { totalCount: number; lastSyncedAt: string | null } {
   const countRow = db.prepare("SELECT COUNT(*) as count FROM channels").get() as { count: number } | undefined;
   const lastSyncRow = db.prepare("SELECT MAX(last_synced_at) as last_synced_at FROM channels").get() as
@@ -308,6 +338,69 @@ export function getSubscriptionIds(
     `SELECT channel_id, subscription_id FROM channels WHERE channel_id IN (${channelIds.map(() => "?").join(",")})`
   );
   return stmt.all(...channelIds) as { channel_id: string; subscription_id: string }[];
+}
+
+export function getChannelTitles(db: Database, channelIds: string[]): Record<string, string> {
+  if (!channelIds || channelIds.length === 0) return {};
+  const stmt = db.prepare(
+    `SELECT channel_id, title FROM channels WHERE channel_id IN (${channelIds.map(() => "?").join(",")})`
+  );
+  const rows = stmt.all(...channelIds) as { channel_id: string; title: string }[];
+  return Object.fromEntries(rows.map((r) => [r.channel_id, r.title]));
+}
+
+export type ActionType = "unsubscribe" | "tag";
+
+/**
+ * Snapshot of a completed bulk operation. `payload` keeps everything needed
+ * to redo the action later (channel ids, a title snapshot for display after
+ * the channels are gone, and tag/category values for tag actions).
+ */
+export interface ActionRecord {
+  id: number;
+  type: ActionType;
+  payload: string; // JSON
+  total: number;
+  succeeded_count: number;
+  failed_count: number;
+  quota_stopped: number; // 0 | 1
+  created_at: string;
+}
+
+export interface RecordActionInput {
+  type: ActionType;
+  payload: Record<string, unknown>;
+  total: number;
+  succeededCount: number;
+  failedCount: number;
+  quotaStopped: boolean;
+}
+
+export function recordAction(db: Database, input: RecordActionInput): number {
+  const result = db
+    .prepare(
+      `INSERT INTO actions (type, payload, total, succeeded_count, failed_count, quota_stopped, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      input.type,
+      JSON.stringify(input.payload),
+      input.total,
+      input.succeededCount,
+      input.failedCount,
+      input.quotaStopped ? 1 : 0,
+      new Date().toISOString()
+    );
+  return Number(result.lastInsertRowid);
+}
+
+export function getRecentActions(db: Database, limit = 20): ActionRecord[] {
+  return db.prepare("SELECT * FROM actions ORDER BY id DESC LIMIT ?").all(limit) as ActionRecord[];
+}
+
+export function getActionById(db: Database, id: number): ActionRecord | null {
+  const row = db.prepare("SELECT * FROM actions WHERE id = ?").get(id) as ActionRecord | undefined;
+  return row ?? null;
 }
 
 export function deleteChannels(db: Database, channelIds: string[]): number {

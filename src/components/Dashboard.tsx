@@ -1,23 +1,70 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ChannelRecord } from "@/lib/db";
 import { TopBar } from "./TopBar";
+import { ChannelFilters } from "./ChannelFilters";
 import { ChannelTable } from "./ChannelTable";
 import { BulkActionBar } from "./BulkActionBar";
+import { CategoriesTab } from "./CategoriesTab";
+import { ActivityTab } from "./ActivityTab";
 import { ExportControls } from "./ExportControls";
 import { UnsubscribeConfirmModal } from "./UnsubscribeConfirmModal";
-import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Layers } from "lucide-react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { readActionStream, type StreamProgress, type StreamSummary } from "@/lib/actionStream";
+import { fetchJson, postJson, categoriesQueryOptions, syncStatusQueryOptions, UnauthorizedError } from "@/lib/api";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  FolderOpen,
+  History,
+  ListVideo,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface DashboardProps {
   onDisconnect: () => void;
 }
 
+export type UnsubscribeProgress = StreamProgress;
+
+interface UnsubscribeTarget {
+  channelIds: string[];
+  preview: { channel_id: string; title: string }[];
+  /** Human-readable description of the target, e.g. `category "Tech"`. */
+  label?: string;
+}
+
+interface ChannelsResponse {
+  channels: ChannelRecord[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+interface SyncResponse {
+  count: number;
+  errors?: { reason: string; message: string }[];
+  lastSyncedAt?: string;
+}
+
 export function Dashboard({ onDisconnect }: DashboardProps) {
-  const [disconnecting, setDisconnecting] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+
   const [quotaError, setQuotaError] = useState<{ message: string; count: number } | null>(null);
-  const [syncSuccessMessage, setSyncSuccessMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  const clearBanners = () => {
+    setQuotaError(null);
+    setActionError(null);
+    setSuccessMessage(null);
+  };
+
+  // Tab State
+  const [activeTab, setActiveTab] = useState("channels");
 
   // Filter & Sort State
   const [searchQuery, setSearchQuery] = useState("");
@@ -27,17 +74,13 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
   const [sortBy, setSortBy] = useState("title");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [category, setCategory] = useState("");
-  const [categories, setCategories] = useState<string[]>([]);
 
   // Pagination State
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-  const [totalChannels, setTotalChannels] = useState(0);
 
-  // Channels & Selection State
-  const [channels, setChannels] = useState<ChannelRecord[]>([]);
+  // Selection State
   const [selectedChannelIds, setSelectedChannelIds] = useState<Set<string>>(new Set());
-  const [isLoadingChannels, setIsLoadingChannels] = useState(false);
 
   // Debounce search inputs
   useEffect(() => {
@@ -56,23 +99,10 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
     return () => clearTimeout(timer);
   }, [tagQuery]);
 
-  // Fetch Categories on mount
-  const fetchCategories = useCallback(async () => {
-    try {
-      const res = await fetch("/api/categories");
-      if (res.ok) {
-        const data = await res.json();
-        setCategories(data.categories || []);
-      }
-    } catch (err) {
-      console.error("Failed to fetch categories:", err);
-    }
-  }, []);
-
-  // Fetch Channels
-  const fetchChannels = useCallback(async () => {
-    setIsLoadingChannels(true);
-    try {
+  // Queries
+  const channelsQuery = useQuery({
+    queryKey: ["channels", { q: debouncedSearch, tag: debouncedTag, sortBy, sortDir, category, page, pageSize }],
+    queryFn: () => {
       const params = new URLSearchParams();
       if (debouncedSearch) params.set("q", debouncedSearch);
       if (debouncedTag) params.set("tag", debouncedTag);
@@ -81,101 +111,83 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
       if (category) params.set("category", category);
       params.set("page", String(page));
       params.set("pageSize", String(pageSize));
+      return fetchJson<ChannelsResponse>(`/api/channels?${params.toString()}`);
+    },
+    placeholderData: keepPreviousData,
+  });
+  const channels = channelsQuery.data?.channels ?? [];
+  const totalChannels = channelsQuery.data?.total ?? 0;
 
-      const res = await fetch(`/api/channels?${params.toString()}`);
-      if (res.status === 401) {
-        onDisconnect();
-        return;
-      }
+  const categoriesQuery = useQuery(categoriesQueryOptions);
+  const categories = categoriesQuery.data?.categories ?? [];
 
-      if (res.ok) {
-        const data = await res.json();
-        setChannels(data.channels || []);
-        setTotalChannels(data.total || 0);
-      }
-    } catch (err) {
-      console.error("Failed to fetch channels:", err);
-    } finally {
-      setIsLoadingChannels(false);
-    }
-  }, [debouncedSearch, debouncedTag, sortBy, sortDir, category, page, pageSize, onDisconnect]);
+  const syncStatusQuery = useQuery(syncStatusQueryOptions);
+  const lastSyncedAt = syncStatusQuery.data?.lastSyncedAt ?? null;
 
-  // Fetch Sync Status
-  const fetchSyncStatus = useCallback(async () => {
-    try {
-      const res = await fetch("/api/sync");
-      if (res.ok) {
-        const data = await res.json();
-        setLastSyncedAt(data.lastSyncedAt || null);
-      }
-    } catch (err) {
-      console.error("Failed to fetch sync status:", err);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchSyncStatus();
-    fetchCategories();
-  }, [fetchSyncStatus, fetchCategories]);
-
-  useEffect(() => {
-    fetchChannels();
-  }, [fetchChannels]);
-
-  // Sync Action
-  const handleSync = async () => {
-    setIsSyncing(true);
-    setQuotaError(null);
-    setSyncSuccessMessage(null);
-
-    try {
-      const res = await fetch("/api/sync", { method: "POST" });
-      const data = await res.json();
-
-      if (res.status === 401) {
-        onDisconnect();
-        return;
-      }
-
-      if (res.ok) {
-        if (data.lastSyncedAt) {
-          setLastSyncedAt(data.lastSyncedAt);
-        }
-
-        const quotaErr = data.errors?.find((e: any) => e.reason === "quotaExceeded");
-        if (quotaErr) {
-          setQuotaError({
-            message: quotaErr.message || "YouTube API daily quota exceeded.",
-            count: data.count ?? 0,
-          });
-        } else {
-          setSyncSuccessMessage(`Successfully synced ${data.count} channel${data.count === 1 ? "" : "s"}.`);
-        }
-
-        fetchCategories();
-        fetchChannels();
-      }
-    } catch (err) {
-      console.error("Failed to sync:", err);
-    } finally {
-      setIsSyncing(false);
-    }
+  const invalidateChannelData = () => {
+    queryClient.invalidateQueries({ queryKey: ["channels"] });
+    queryClient.invalidateQueries({ queryKey: ["categories"] });
+    queryClient.invalidateQueries({ queryKey: ["actions"] });
   };
 
-  const handleDisconnect = async () => {
-    setDisconnecting(true);
-    try {
-      const res = await fetch("/api/auth/disconnect", { method: "POST" });
-      if (res.ok) {
-        onDisconnect();
+  // Mutations
+  const syncMutation = useMutation({
+    mutationFn: () => postJson<SyncResponse>("/api/sync"),
+    onMutate: clearBanners,
+    onSuccess: (data) => {
+      const quotaErr = data.errors?.find((e) => e.reason === "quotaExceeded");
+      if (quotaErr) {
+        setQuotaError({
+          message: quotaErr.message || "YouTube API daily quota exceeded.",
+          count: data.count ?? 0,
+        });
       } else {
-        console.error("Failed to disconnect");
+        setSuccessMessage(`Successfully synced ${data.count} channel${data.count === 1 ? "" : "s"}.`);
       }
-    } catch (err) {
+      queryClient.invalidateQueries({ queryKey: ["syncStatus"] });
+      invalidateChannelData();
+    },
+    onError: (err) => {
+      if (err instanceof UnauthorizedError) return;
+      console.error("Failed to sync:", err);
+      setActionError(err.message || "Sync failed. Check your connection and try again.");
+    },
+  });
+
+  const disconnectMutation = useMutation({
+    mutationFn: () => postJson("/api/auth/disconnect"),
+    onSuccess: onDisconnect,
+    onError: (err) => {
       console.error("Disconnect error:", err);
-    } finally {
-      setIsSyncing(false);
-    }
+      setActionError("Failed to disconnect. Try again.");
+    },
+  });
+
+  const tagMutation = useMutation({
+    mutationFn: (input: { channelIds: string[]; category?: string; tags?: string[] }) =>
+      postJson<{ updatedCount: number }>("/api/channels/tag", input),
+    onSuccess: () => {
+      setSelectedChannelIds(new Set());
+      invalidateChannelData();
+    },
+    onError: (err) => {
+      if (err instanceof UnauthorizedError) return;
+      console.error("Bulk tag/category error:", err);
+      setActionError(err.message || "Failed to apply category/tags.");
+    },
+  });
+
+  const handleBulkTagCategory = async (categoryToApply?: string, tagsToApply?: string[]) => {
+    if (selectedChannelIds.size === 0) return;
+    await tagMutation
+      .mutateAsync({
+        channelIds: Array.from(selectedChannelIds),
+        category: categoryToApply,
+        tags: tagsToApply,
+      })
+      .catch(() => {
+        // Errors are surfaced via the mutation's onError banner.
+      });
   };
 
   // Selection Logic
@@ -206,250 +218,312 @@ export function Dashboard({ onDisconnect }: DashboardProps) {
         if (category) params.set("category", category);
         params.set("allIdsOnly", "true");
 
-        const res = await fetch(`/api/channels?${params.toString()}`);
-        if (res.ok) {
-          const data = await res.json();
-          setSelectedChannelIds(new Set(data.channelIds || []));
-        } else {
-          // Fallback to selecting current page channels
-          setSelectedChannelIds(new Set(channels.map((c) => c.channel_id)));
-        }
+        const data = await fetchJson<{ channelIds: string[] }>(`/api/channels?${params.toString()}`);
+        setSelectedChannelIds(new Set(data.channelIds || []));
       } catch {
+        // Fallback to selecting current page channels
         setSelectedChannelIds(new Set(channels.map((c) => c.channel_id)));
       }
     }
   };
 
-  const handleBulkTagCategory = async (categoryToApply?: string, tagsToApply?: string[]) => {
-    if (selectedChannelIds.size === 0) return;
+  // Unsubscribe State (driven by a target: current selection or a whole category)
+  const [unsubscribeTarget, setUnsubscribeTarget] = useState<UnsubscribeTarget | null>(null);
+  const [unsubscribeProgress, setUnsubscribeProgress] = useState<StreamProgress | null>(null);
 
-    try {
-      const res = await fetch("/api/channels/tag", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          channelIds: Array.from(selectedChannelIds),
-          category: categoryToApply,
-          tags: tagsToApply,
-        }),
-      });
-
-      if (res.status === 401) {
-        onDisconnect();
-        return;
-      }
-
-      if (res.ok) {
-        setSelectedChannelIds(new Set());
-        await fetchCategories();
-        await fetchChannels();
-      }
-    } catch (err) {
-      console.error("Bulk tag/category error:", err);
-    }
-  };
-
-  // Unsubscribe Modal State
-  const [isUnsubscribeModalOpen, setIsUnsubscribeModalOpen] = useState(false);
-  const [isUnsubscribing, setIsUnsubscribing] = useState(false);
-
-  const handleBulkUnsubscribeConfirm = async () => {
-    if (selectedChannelIds.size === 0) return;
-
-    setIsUnsubscribing(true);
-    setQuotaError(null);
-    setSyncSuccessMessage(null);
-
-    try {
+  const unsubscribeMutation = useMutation({
+    mutationFn: async (channelIds: string[]): Promise<StreamSummary> => {
       const res = await fetch("/api/channels/unsubscribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channelIds: Array.from(selectedChannelIds) }),
+        body: JSON.stringify({ channelIds }),
       });
-
-      if (res.status === 401) {
-        onDisconnect();
-        return;
+      if (res.status === 401) throw new UnauthorizedError();
+      return readActionStream(res, setUnsubscribeProgress);
+    },
+    onMutate: (channelIds) => {
+      clearBanners();
+      setUnsubscribeProgress({ processed: 0, total: channelIds.length });
+    },
+    onSuccess: ({ succeeded, failed, quotaStopped }, channelIds) => {
+      if (quotaStopped) {
+        const remaining = channelIds.length - succeeded.length - failed.length;
+        setQuotaError({
+          message: `YouTube API quota limit reached. Unsubscribed ${succeeded.length} channel${
+            succeeded.length === 1 ? "" : "s"
+          }; ${remaining} channel${remaining === 1 ? "" : "s"} not attempted. You can redo this action from the Activity tab tomorrow.`,
+          count: succeeded.length,
+        });
+      } else if (failed.length > 0) {
+        const firstReason = failed[0]?.reason ? ` First error: ${failed[0].reason}` : "";
+        setActionError(
+          `${failed.length} channel${failed.length === 1 ? "" : "s"} could not be unsubscribed (${succeeded.length} succeeded).${firstReason} You can redo this action from the Activity tab.`
+        );
+      } else if (succeeded.length > 0) {
+        setSuccessMessage(`Successfully unsubscribed from ${succeeded.length} channel${succeeded.length === 1 ? "" : "s"}.`);
       }
-
-      if (res.ok) {
-        const data = await res.json();
-        const succeededCount = data.succeeded?.length || 0;
-        const quotaStopped = Boolean(data.quotaStopped);
-
-        if (quotaStopped) {
-          const remainingCount = selectedChannelIds.size - succeededCount;
-          setQuotaError({
-            message: `YouTube API quota limit reached. Unsubscribed ${succeededCount} channel${
-              succeededCount === 1 ? "" : "s"
-            }. ${remainingCount} channel${remainingCount === 1 ? "" : "s"} could not be unsubscribed today.`,
-            count: succeededCount,
-          });
-        } else if (succeededCount > 0) {
-          setSyncSuccessMessage(`Successfully unsubscribed from ${succeededCount} channel${succeededCount === 1 ? "" : "s"}.`);
-        }
-
-        setSelectedChannelIds(new Set());
-        setIsUnsubscribeModalOpen(false);
-        await fetchCategories();
-        await fetchChannels();
-      }
-    } catch (err) {
+    },
+    onError: (err) => {
+      if (err instanceof UnauthorizedError) return;
       console.error("Bulk unsubscribe failed:", err);
-    } finally {
-      setIsUnsubscribing(false);
+      setActionError(
+        `${err.message || "Bulk unsubscribe failed."} Progress up to the interruption was saved; check the Activity tab to redo the remainder.`
+      );
+    },
+    onSettled: () => {
+      setUnsubscribeProgress(null);
+      setUnsubscribeTarget(null);
+      setSelectedChannelIds(new Set());
+      // Always refresh: the server removes rows as it goes, so even an
+      // interrupted batch changed local state.
+      invalidateChannelData();
+    },
+  });
+
+  const handleOpenSelectionUnsubscribe = () => {
+    const preview = channels
+      .filter((c) => selectedChannelIds.has(c.channel_id))
+      .map((c) => ({ channel_id: c.channel_id, title: c.title }));
+    setUnsubscribeTarget({ channelIds: Array.from(selectedChannelIds), preview });
+  };
+
+  const handleOpenCategoryUnsubscribe = async (cat: string) => {
+    try {
+      const [idsData, previewData] = await Promise.all([
+        fetchJson<{ channelIds: string[] }>(`/api/channels?category=${encodeURIComponent(cat)}&allIdsOnly=true`),
+        fetchJson<ChannelsResponse>(`/api/channels?category=${encodeURIComponent(cat)}&page=1&pageSize=50`),
+      ]);
+
+      const channelIds = idsData.channelIds || [];
+      if (channelIds.length === 0) return;
+
+      setUnsubscribeTarget({
+        channelIds,
+        preview: (previewData.channels || []).map((c) => ({ channel_id: c.channel_id, title: c.title })),
+        label: `category "${cat}"`,
+      });
+    } catch (err) {
+      if (err instanceof UnauthorizedError) return;
+      console.error("Failed to prepare category unsubscribe:", err);
+      setActionError("Could not load the channels for that category. Try again.");
     }
   };
 
-  const selectedChannelsList = channels.filter((c) => selectedChannelIds.has(c.channel_id));
+  const handleUnsubscribeConfirm = () => {
+    const target = unsubscribeTarget;
+    if (!target || target.channelIds.length === 0 || unsubscribeMutation.isPending) return;
+    unsubscribeMutation.mutate(target.channelIds);
+  };
+
   const isAllSelected = totalChannels > 0 && selectedChannelIds.size === totalChannels;
   const totalPages = Math.ceil(totalChannels / pageSize) || 1;
+  const isSyncing = syncMutation.isPending;
+  const disconnecting = disconnectMutation.isPending;
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-red-500 selection:text-white">
-      {/* TopBar Component */}
+    <div className="flex min-h-screen flex-col bg-background text-foreground">
       <TopBar
-        searchQuery={searchQuery}
-        onSearchChange={(q) => {
-          setSearchQuery(q);
-          setPage(1);
-        }}
-        tag={tagQuery}
-        onTagChange={(t) => {
-          setTagQuery(t);
-          setPage(1);
-        }}
-        sortBy={sortBy}
-        onSortByChange={(sb) => {
-          setSortBy(sb);
-          setPage(1);
-        }}
-        sortDir={sortDir}
-        onSortDirToggle={() => setSortDir((prev) => (prev === "asc" ? "desc" : "asc"))}
-        category={category}
-        onCategoryChange={(cat) => {
-          setCategory(cat);
-          setPage(1);
-        }}
-        categories={categories}
         lastSyncedAt={lastSyncedAt}
         isSyncing={isSyncing}
-        onSync={handleSync}
-        onDisconnect={handleDisconnect}
+        onSync={() => syncMutation.mutate()}
+        onDisconnect={() => disconnectMutation.mutate()}
         disconnecting={disconnecting}
       />
 
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-6xl w-full mx-auto p-6 md:p-8 space-y-6 pb-28">
+      <main className="mx-auto w-full max-w-6xl flex-1 space-y-4 p-4 pb-32 sm:p-6">
         {/* Quota Exceeded Warning Banner */}
         {quotaError && (
-          <div className="p-4 rounded-xl bg-amber-950/40 border border-amber-500/30 text-amber-200 flex items-start gap-3 shadow-lg">
-            <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+          <div className="flex items-start gap-3 rounded-lg border border-destructive/50 bg-destructive/10 p-4">
+            <AlertTriangle className="mt-0.5 size-5 shrink-0 text-destructive" />
             <div className="space-y-1 text-sm">
-              <h4 className="font-semibold text-amber-300">YouTube API Quota Reached</h4>
-              <p className="text-slate-300 text-xs leading-relaxed">
-                {quotaError.message} You can retry tomorrow when Google resets daily quota (~10,000 quota units / ~200 deletes per day).
+              <h4 className="font-semibold text-destructive">YouTube API quota reached</h4>
+              <p className="text-sm text-muted-foreground">
+                {quotaError.message} Google resets the daily quota (~10,000 units / ~200 deletes) every 24 hours.
               </p>
             </div>
           </div>
         )}
 
-        {/* Sync Success Message */}
-        {syncSuccessMessage && !quotaError && (
-          <div className="p-4 rounded-xl bg-emerald-950/40 border border-emerald-500/30 text-emerald-200 flex items-center gap-3 shadow-md">
-            <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
-            <p className="text-sm font-medium">{syncSuccessMessage}</p>
+        {/* Action Error Banner */}
+        {actionError && (
+          <div className="flex items-start gap-3 rounded-lg border border-destructive/50 bg-destructive/10 p-4">
+            <AlertTriangle className="mt-0.5 size-5 shrink-0 text-destructive" />
+            <p className="text-sm text-destructive">{actionError}</p>
           </div>
         )}
 
-        {/* Channel Table & Controls */}
-        <div className="space-y-4">
-          <ChannelTable
-            channels={channels}
-            selectedChannelIds={selectedChannelIds}
-            onToggleSelectChannel={handleToggleSelectChannel}
-            onToggleSelectAll={handleToggleSelectAll}
-            isAllSelected={isAllSelected}
-            totalChannels={totalChannels}
-          />
+        {/* Success Message */}
+        {successMessage && !quotaError && !actionError && (
+          <div className="flex items-center gap-3 rounded-lg border bg-card p-4">
+            <CheckCircle2 className="size-5 shrink-0 text-chart-2" />
+            <p className="text-sm font-medium text-card-foreground">{successMessage}</p>
+          </div>
+        )}
 
-          {/* Pagination Controls */}
-          {totalChannels > 0 && (
-            <div className="flex items-center justify-between flex-wrap gap-4 px-2 py-2 text-xs text-slate-400 font-mono">
-              <div className="flex items-center gap-2">
-                <span>Show</span>
-                <select
-                  value={pageSize}
-                  onChange={(e) => {
-                    setPageSize(Number(e.target.value));
-                    setPage(1);
-                  }}
-                  className="bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 focus:outline-none"
-                >
-                  <option value={10}>10</option>
-                  <option value={20}>20</option>
-                  <option value={50}>50</option>
-                  <option value={100}>100</option>
-                </select>
-                <span>per page (Showing {channels.length} of {totalChannels})</span>
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="gap-4">
+          <TabsList>
+            <TabsTrigger value="channels">
+              <ListVideo />
+              Channels
+            </TabsTrigger>
+            <TabsTrigger value="categories">
+              <FolderOpen />
+              Categories
+            </TabsTrigger>
+            <TabsTrigger value="activity">
+              <History />
+              Activity
+            </TabsTrigger>
+            <TabsTrigger value="export">
+              <Download />
+              Export
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="channels" className="space-y-4">
+            <ChannelFilters
+              searchQuery={searchQuery}
+              onSearchChange={(q) => {
+                setSearchQuery(q);
+                setPage(1);
+              }}
+              tag={tagQuery}
+              onTagChange={(t) => {
+                setTagQuery(t);
+                setPage(1);
+              }}
+              sortBy={sortBy}
+              onSortByChange={(sb) => {
+                setSortBy(sb);
+                setPage(1);
+              }}
+              sortDir={sortDir}
+              onSortDirToggle={() => setSortDir((prev) => (prev === "asc" ? "desc" : "asc"))}
+              category={category}
+              onCategoryChange={(cat) => {
+                setCategory(cat);
+                setPage(1);
+              }}
+              categories={categories}
+            />
+
+            <ChannelTable
+              channels={channels}
+              selectedChannelIds={selectedChannelIds}
+              onToggleSelectChannel={handleToggleSelectChannel}
+              onToggleSelectAll={handleToggleSelectAll}
+              isAllSelected={isAllSelected}
+              totalChannels={totalChannels}
+            />
+
+            {/* Pagination Controls */}
+            {totalChannels > 0 && (
+              <div className="flex flex-wrap items-center justify-between gap-4 text-sm text-muted-foreground">
+                <div className="flex items-center gap-2">
+                  <span>Show</span>
+                  <select
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value));
+                      setPage(1);
+                    }}
+                    className="h-8 rounded-md border border-input bg-background px-2 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50"
+                  >
+                    <option value={10}>10</option>
+                    <option value={20}>20</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                  </select>
+                  <span>
+                    per page &middot; showing {channels.length} of {totalChannels}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Button
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={page <= 1 || channelsQuery.isFetching}
+                    variant="outline"
+                    size="icon-sm"
+                    aria-label="Previous page"
+                  >
+                    <ChevronLeft />
+                  </Button>
+
+                  <span className="tabular-nums">
+                    Page {page} of {totalPages}
+                  </span>
+
+                  <Button
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={page >= totalPages || channelsQuery.isFetching}
+                    variant="outline"
+                    size="icon-sm"
+                    aria-label="Next page"
+                  >
+                    <ChevronRight />
+                  </Button>
+                </div>
               </div>
+            )}
+          </TabsContent>
 
-              <div className="flex items-center gap-2">
-                <Button
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={page <= 1 || isLoadingChannels}
-                  variant="outline"
-                  size="sm"
-                  className="border-slate-800 bg-slate-900 hover:bg-slate-800 text-slate-300 h-8 px-2.5"
-                >
-                  <ChevronLeft className="w-4 h-4" />
-                </Button>
+          <TabsContent value="categories">
+            <CategoriesTab
+              onBrowse={(cat) => {
+                setCategory(cat);
+                setPage(1);
+                setActiveTab("channels");
+              }}
+              onUnsubscribeCategory={handleOpenCategoryUnsubscribe}
+            />
+          </TabsContent>
 
-                <span>
-                  Page {page} of {totalPages}
-                </span>
+          <TabsContent value="activity">
+            <ActivityTab
+              onDataChanged={() => {
+                // A redo may have resolved whatever an earlier banner reported.
+                clearBanners();
+                invalidateChannelData();
+              }}
+            />
+          </TabsContent>
 
-                <Button
-                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                  disabled={page >= totalPages || isLoadingChannels}
-                  variant="outline"
-                  size="sm"
-                  className="border-slate-800 bg-slate-900 hover:bg-slate-800 text-slate-300 h-8 px-2.5"
-                >
-                  <ChevronRight className="w-4 h-4" />
-                </Button>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Export Controls Section */}
-        <ExportControls
-          searchQuery={debouncedSearch}
-          tagQuery={debouncedTag}
-          category={category}
-          sortBy={sortBy}
-          sortDir={sortDir}
-        />
+          <TabsContent value="export">
+            <ExportControls
+              searchQuery={debouncedSearch}
+              tagQuery={debouncedTag}
+              category={category}
+              sortBy={sortBy}
+              sortDir={sortDir}
+            />
+          </TabsContent>
+        </Tabs>
       </main>
 
-      {/* Floating Bulk Action Bar */}
-      <BulkActionBar
-        selectedCount={selectedChannelIds.size}
-        categories={categories}
-        onApply={handleBulkTagCategory}
-        onUnsubscribe={() => setIsUnsubscribeModalOpen(true)}
-        onClearSelection={() => setSelectedChannelIds(new Set())}
-      />
+      {/* Floating Bulk Action Bar (only relevant while browsing channels) */}
+      {activeTab === "channels" && (
+        <BulkActionBar
+          selectedCount={selectedChannelIds.size}
+          categories={categories}
+          onApply={handleBulkTagCategory}
+          onUnsubscribe={handleOpenSelectionUnsubscribe}
+          onClearSelection={() => setSelectedChannelIds(new Set())}
+        />
+      )}
 
       {/* Unsubscribe Confirmation Modal */}
       <UnsubscribeConfirmModal
-        isOpen={isUnsubscribeModalOpen}
-        selectedChannels={selectedChannelsList}
-        totalSelectedCount={selectedChannelIds.size}
-        onConfirm={handleBulkUnsubscribeConfirm}
-        onCancel={() => setIsUnsubscribeModalOpen(false)}
-        isUnsubscribing={isUnsubscribing}
+        isOpen={unsubscribeTarget !== null}
+        selectedChannels={unsubscribeTarget?.preview ?? []}
+        totalSelectedCount={unsubscribeTarget?.channelIds.length ?? 0}
+        targetLabel={unsubscribeTarget?.label}
+        onConfirm={handleUnsubscribeConfirm}
+        onCancel={() => {
+          if (!unsubscribeMutation.isPending) setUnsubscribeTarget(null);
+        }}
+        isUnsubscribing={unsubscribeMutation.isPending}
+        progress={unsubscribeProgress}
       />
     </div>
   );

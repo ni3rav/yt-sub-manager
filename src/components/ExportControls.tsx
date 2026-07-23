@@ -10,6 +10,28 @@ interface ExportControlsProps {
   sortDir?: "asc" | "desc";
 }
 
+function ToggleOption({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex items-center justify-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+        active ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function ExportControls({
   searchQuery = "",
   tagQuery = "",
@@ -40,96 +62,58 @@ export function ExportControls({
   };
 
   return (
-    <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
-      <div className="flex items-center justify-between flex-wrap gap-3 border-b border-slate-800 pb-3">
+    <div className="space-y-4 rounded-xl border bg-card p-5 text-card-foreground shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-3">
         <div className="flex items-center gap-2">
-          <Download className="w-5 h-5 text-blue-400" />
-          <h3 className="font-semibold text-slate-100 text-sm">Export Subscriptions</h3>
+          <Download className="size-5 text-muted-foreground" />
+          <h3 className="text-sm font-semibold">Export subscriptions</h3>
         </div>
-        <p className="text-xs text-slate-400">
+        <p className="text-sm text-muted-foreground">
           Download your subscription library including category and tag metadata.
         </p>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 items-center">
+      <div className="grid grid-cols-1 items-end gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {/* Format Selector Toggle */}
         <div className="space-y-1.5">
-          <label className="text-xs font-medium text-slate-400">Export Format</label>
-          <div className="grid grid-cols-2 gap-2 bg-slate-950 p-1 rounded-xl border border-slate-800">
-            <button
-              type="button"
-              onClick={() => setFormat("csv")}
-              className={`flex items-center justify-center gap-2 py-1.5 px-3 rounded-lg text-xs font-medium transition-colors ${
-                format === "csv"
-                  ? "bg-blue-600 text-white shadow-sm"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-900"
-              }`}
-            >
-              <FileSpreadsheet className="w-4 h-4" />
-              <span>CSV</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setFormat("json")}
-              className={`flex items-center justify-center gap-2 py-1.5 px-3 rounded-lg text-xs font-medium transition-colors ${
-                format === "json"
-                  ? "bg-blue-600 text-white shadow-sm"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-900"
-              }`}
-            >
-              <FileJson className="w-4 h-4" />
-              <span>JSON</span>
-            </button>
+          <label className="text-sm font-medium text-muted-foreground">Format</label>
+          <div className="grid grid-cols-2 gap-1 rounded-lg bg-muted p-1">
+            <ToggleOption active={format === "csv"} onClick={() => setFormat("csv")}>
+              <FileSpreadsheet className="size-4" />
+              CSV
+            </ToggleOption>
+            <ToggleOption active={format === "json"} onClick={() => setFormat("json")}>
+              <FileJson className="size-4" />
+              JSON
+            </ToggleOption>
           </div>
         </div>
 
         {/* Scope Selector Toggle */}
         <div className="space-y-1.5">
-          <label className="text-xs font-medium text-slate-400">Export Scope</label>
-          <div className="grid grid-cols-2 gap-2 bg-slate-950 p-1 rounded-xl border border-slate-800">
-            <button
-              type="button"
-              onClick={() => setScope("filtered")}
-              className={`flex items-center justify-center gap-2 py-1.5 px-3 rounded-lg text-xs font-medium transition-colors ${
-                scope === "filtered"
-                  ? "bg-blue-600 text-white shadow-sm"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-900"
-              }`}
-            >
-              <Filter className="w-3.5 h-3.5" />
-              <span>Filtered</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setScope("all")}
-              className={`flex items-center justify-center gap-2 py-1.5 px-3 rounded-lg text-xs font-medium transition-colors ${
-                scope === "all"
-                  ? "bg-blue-600 text-white shadow-sm"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-900"
-              }`}
-            >
-              <Globe className="w-3.5 h-3.5" />
-              <span>All Library</span>
-            </button>
+          <label className="text-sm font-medium text-muted-foreground">Scope</label>
+          <div className="grid grid-cols-2 gap-1 rounded-lg bg-muted p-1">
+            <ToggleOption active={scope === "filtered"} onClick={() => setScope("filtered")}>
+              <Filter className="size-4" />
+              Filtered
+            </ToggleOption>
+            <ToggleOption active={scope === "all"} onClick={() => setScope("all")}>
+              <Globe className="size-4" />
+              All library
+            </ToggleOption>
           </div>
         </div>
 
         {/* Action Button */}
-        <div className="space-y-1.5 sm:col-span-2 lg:col-span-1 flex flex-col justify-end">
-          <span className="hidden lg:block text-xs font-medium text-transparent opacity-0">Action</span>
-          <Button
-            onClick={handleExport}
-            className="w-full bg-blue-600 hover:bg-blue-500 text-white font-medium flex items-center justify-center gap-2 h-[38px] rounded-xl shadow-md shadow-blue-600/20"
-          >
-            <Download className="w-4 h-4" />
-            <span>Download {format.toUpperCase()}</span>
-          </Button>
-        </div>
+        <Button onClick={handleExport} className="w-full sm:col-span-2 lg:col-span-1">
+          <Download />
+          Download {format.toUpperCase()}
+        </Button>
       </div>
 
       {scope === "filtered" && hasActiveFilter && (
-        <p className="text-[11px] font-mono text-blue-400 bg-blue-950/40 border border-blue-500/20 px-3 py-1.5 rounded-lg">
-          Filter active: export will include channels matching current search/category/tag filters.
+        <p className="rounded-lg bg-muted px-3 py-1.5 text-sm text-muted-foreground">
+          Filter active: the export will only include channels matching the current search, category, and tag filters.
         </p>
       )}
     </div>

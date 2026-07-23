@@ -48,10 +48,7 @@ export function BulkActionBar({
   };
 
   const handleApply = async () => {
-    const categoryValue = isCustomCategoryMode
-      ? customCategory.trim()
-      : selectedCategory.trim();
-
+    const categoryValue = isCustomCategoryMode ? customCategory.trim() : selectedCategory.trim();
     const categoryToSubmit = categoryValue ? categoryValue : undefined;
 
     const pendingTag = tagInput.trim();
@@ -78,31 +75,25 @@ export function BulkActionBar({
   const pendingTag = tagInput.trim();
   const canApply = Boolean(finalCategory || tags.length > 0 || pendingTag) && !isSubmitting;
 
-
   return (
-    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-full max-w-4xl px-4">
-      <div className="bg-slate-900/95 backdrop-blur-md border border-slate-800 rounded-2xl shadow-2xl p-4 flex flex-wrap items-center justify-between gap-4 text-slate-200 animate-in fade-in slide-in-from-bottom-4 duration-200">
+    <div className="fixed bottom-6 left-1/2 z-40 w-full max-w-4xl -translate-x-1/2 px-4">
+      <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border bg-card p-4 text-card-foreground shadow-lg">
         {/* Selection Count */}
         <div className="flex items-center gap-3">
-          <div className="bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-semibold px-3 py-1.5 rounded-full flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+          <span className="rounded-full bg-primary px-2.5 py-0.5 text-xs font-medium text-primary-foreground">
             {selectedCount} selected
-          </div>
-          <button
-            onClick={onClearSelection}
-            className="text-xs text-slate-400 hover:text-slate-200 transition-colors flex items-center gap-1"
-            title="Clear selection"
-          >
-            <X className="w-3.5 h-3.5" />
+          </span>
+          <Button onClick={onClearSelection} variant="ghost" size="sm" title="Clear selection">
+            <X />
             Clear
-          </button>
+          </Button>
         </div>
 
         {/* Category & Tag Fields */}
-        <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[300px]">
+        <div className="flex min-w-64 flex-1 flex-wrap items-center gap-3">
           {/* Category Input / Select */}
           <div className="flex items-center gap-2">
-            <FolderPlus className="w-4 h-4 text-slate-400 shrink-0" />
+            <FolderPlus className="size-4 shrink-0 text-muted-foreground" />
             {!isCustomCategoryMode ? (
               <select
                 value={selectedCategory}
@@ -114,15 +105,15 @@ export function BulkActionBar({
                     setSelectedCategory(e.target.value);
                   }
                 }}
-                className="bg-slate-950 border border-slate-800 text-slate-200 text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-red-500/50"
+                className="h-8 cursor-pointer rounded-md border border-input bg-background px-2 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50"
               >
-                <option value="">-- Set Category --</option>
+                <option value="">Set category&hellip;</option>
                 {categories.map((cat) => (
                   <option key={cat} value={cat}>
                     {cat}
                   </option>
                 ))}
-                <option value="__NEW__">+ Create New Category...</option>
+                <option value="__NEW__">+ Create new category&hellip;</option>
               </select>
             ) : (
               <div className="flex items-center gap-1">
@@ -131,39 +122,41 @@ export function BulkActionBar({
                   placeholder="New category name..."
                   value={customCategory}
                   onChange={(e) => setCustomCategory(e.target.value)}
-                  className="bg-slate-950 border-slate-800 text-xs h-8 px-2.5 w-40 text-slate-200"
+                  className="h-8 w-40"
                   autoFocus
                 />
-                <button
+                <Button
                   type="button"
                   onClick={() => {
                     setIsCustomCategoryMode(false);
                     setCustomCategory("");
                   }}
-                  className="text-slate-400 hover:text-slate-200 p-1"
+                  variant="ghost"
+                  size="icon-sm"
                   title="Cancel custom category"
                 >
-                  <X className="w-3.5 h-3.5" />
-                </button>
+                  <X />
+                </Button>
               </div>
             )}
           </div>
 
           {/* Tags Multi-Value Input */}
-          <div className="flex flex-wrap items-center gap-2 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1 min-h-[36px] flex-1">
-            <Tag className="w-4 h-4 text-slate-400 shrink-0" />
+          <div className="flex min-h-9 min-w-48 flex-1 flex-wrap items-center gap-2 rounded-md border border-input bg-background px-2.5 py-1">
+            <Tag className="size-4 shrink-0 text-muted-foreground" />
             {tags.map((t) => (
               <span
                 key={t}
-                className="bg-slate-800 text-slate-200 text-xs px-2 py-0.5 rounded flex items-center gap-1 border border-slate-700"
+                className="flex items-center gap-1 rounded bg-secondary px-2 py-0.5 text-xs text-secondary-foreground"
               >
                 {t}
                 <button
                   type="button"
                   onClick={() => handleRemoveTag(t)}
-                  className="hover:text-red-400 transition-colors"
+                  aria-label={`Remove tag ${t}`}
+                  className="transition-colors hover:text-destructive"
                 >
-                  <X className="w-3 h-3" />
+                  <X className="size-3" />
                 </button>
               </span>
             ))}
@@ -174,35 +167,21 @@ export function BulkActionBar({
               onChange={(e) => setTagInput(e.target.value)}
               onKeyDown={handleKeyDownTag}
               onBlur={handleAddTag}
-              className="bg-transparent text-xs text-slate-200 focus:outline-none flex-1 min-w-[100px]"
+              className="min-w-24 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
             />
           </div>
         </div>
 
         {/* Submit Actions */}
         <div className="flex items-center gap-2">
-          <Button
-            onClick={handleApply}
-            disabled={!canApply}
-            size="sm"
-            className="bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-medium text-xs px-3.5 h-9 disabled:opacity-50"
-          >
-            {isSubmitting ? (
-              <Loader2 className="w-4 h-4 animate-spin mr-1.5" />
-            ) : (
-              <Check className="w-4 h-4 mr-1.5 text-emerald-400" />
-            )}
-            Apply Changes
+          <Button onClick={handleApply} disabled={!canApply} variant="secondary" size="sm">
+            {isSubmitting ? <Loader2 className="animate-spin" /> : <Check />}
+            Apply changes
           </Button>
 
-          <Button
-            onClick={onUnsubscribe}
-            disabled={isSubmitting}
-            size="sm"
-            className="bg-red-600 hover:bg-red-500 text-white font-medium text-xs px-3.5 h-9 shadow-lg shadow-red-600/20 disabled:opacity-50"
-          >
-            <Trash2 className="w-4 h-4 mr-1.5" />
-            Unsubscribe Selected
+          <Button onClick={onUnsubscribe} disabled={isSubmitting} variant="destructive" size="sm">
+            <Trash2 />
+            Unsubscribe selected
           </Button>
         </div>
       </div>
