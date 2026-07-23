@@ -5,7 +5,7 @@ import { ensureAppDataDir } from "./lib/paths";
 import { decryptCredentials, encryptCredentials, deleteCredentials, type AppCredentials } from "./lib/credentials";
 import { openBrowser } from "./lib/browser";
 import { createOAuth2Client, getStoredOAuth2Client, verifyOrRefreshTokens, AuthRevokedError } from "./lib/oauth";
-import { initDatabase, upsertChannels, getChannelsStats, getChannels, getAllMatchingChannelIds, getDistinctCategories, bulkTagAndCategory, getSubscriptionIds, deleteChannels, InvalidSortError, createExportStream } from "./lib/db";
+import { initDatabase, upsertChannels, getChannelsStats, getChannels, getAllMatchingChannelIds, getDistinctCategories, getCategoryStats, bulkTagAndCategory, getSubscriptionIds, deleteChannels, getChannelTitles, recordAction, getRecentActions, getActionById, InvalidSortError, createExportStream, type ActionRecord } from "./lib/db";
 import { fetchAllSubscriptions, createYouTubeClient, QuotaExceededError, isQuotaExceededError, isSubscriptionNotFoundError } from "./lib/youtube";
 
 export interface ServerOptions {
@@ -40,12 +40,147 @@ async function authenticateRequest(appDataDir: string): Promise<Response | null>
   }
 }
 
+const NDJSON_HEADERS = {
+  "Content-Type": "application/x-ndjson; charset=utf-8",
+  "Cache-Control": "no-store",
+} as const;
+
+function serializeAction(action: ActionRecord) {
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = JSON.parse(action.payload || "{}");
+  } catch {
+    payload = {};
+  }
+  return {
+    id: action.id,
+    type: action.type,
+    payload,
+    total: action.total,
+    succeededCount: action.succeeded_count,
+    failedCount: action.failed_count,
+    quotaStopped: Boolean(action.quota_stopped),
+    createdAt: action.created_at,
+  };
+}
+
 export function createAppServer(options: ServerOptions = {}): Server<unknown> {
   const appDataDir = ensureAppDataDir(options.appDataDir);
   const hostname = options.hostname ?? "127.0.0.1";
   const port = options.port ?? 0;
 
   const db = options.db ? initDatabase(options.db) : initDatabase(appDataDir);
+
+  function getYouTubeClientOrError(): { ytClient: any } | { errorResponse: Response } {
+    if (options.youtubeClient) return { ytClient: options.youtubeClient };
+    const redirectUri = `http://127.0.0.1:${server.port}/oauth/callback`;
+    const oauth2Client = getStoredOAuth2Client(appDataDir, redirectUri);
+    if (!oauth2Client) {
+      return { errorResponse: Response.json({ error: "OAuth client not initialized." }, { status: 401 }) };
+    }
+    return { ytClient: createYouTubeClient(oauth2Client) };
+  }
+
+  /**
+   * Streams newline-delimited JSON progress events while unsubscribing.
+   * A buffered JSON response would trip the connection idle timeout on large
+   * batches (250 ms delay per channel adds up), and the client needs a live
+   * progress counter anyway. The completed batch is recorded in the actions
+   * log so it can be redone later.
+   */
+  function createUnsubscribeStreamResponse(params: {
+    ytClient: any;
+    channelIds: string[];
+    interCallDelayMs: number;
+    /** Channels from the original action that are already gone locally (redo). */
+    skipped?: string[];
+    /** Extra fields persisted in the action payload (e.g. redoOf). */
+    payloadExtras?: Record<string, unknown>;
+  }): Response {
+    const { ytClient, channelIds, interCallDelayMs, skipped = [], payloadExtras = {} } = params;
+
+    const subMap = new Map(getSubscriptionIds(db, channelIds).map((r) => [r.channel_id, r.subscription_id]));
+    // Snapshot titles now: rows are deleted as the batch progresses, but the
+    // action log should still display meaningful names afterwards.
+    const titles = getChannelTitles(db, channelIds);
+
+    const encoder = new TextEncoder();
+    const total = channelIds.length;
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        const emit = (event: Record<string, unknown>) => {
+          controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
+        };
+
+        const succeeded: string[] = [];
+        const failed: { channelId: string; reason: string }[] = [];
+        let quotaStopped = false;
+
+        try {
+          for (let i = 0; i < channelIds.length; i++) {
+            const channelId = channelIds[i]!;
+            const subscriptionId = subMap.get(channelId);
+
+            if (!subscriptionId) {
+              const reason = "Subscription ID not found";
+              failed.push({ channelId, reason });
+              emit({ type: "progress", processed: i + 1, total, channelId, status: "failed", reason });
+              continue;
+            }
+
+            if (i > 0 && interCallDelayMs > 0) {
+              await Bun.sleep(interCallDelayMs);
+            }
+
+            try {
+              await ytClient.subscriptions.delete({ id: subscriptionId });
+              succeeded.push(channelId);
+              // Delete immediately so an interrupted batch leaves the
+              // local DB consistent with YouTube.
+              deleteChannels(db, [channelId]);
+              emit({ type: "progress", processed: i + 1, total, channelId, status: "ok" });
+            } catch (err: any) {
+              if (isQuotaExceededError(err)) {
+                quotaStopped = true;
+                break;
+              }
+              if (isSubscriptionNotFoundError(err)) {
+                // Already unsubscribed on YouTube; converge local state.
+                succeeded.push(channelId);
+                deleteChannels(db, [channelId]);
+                emit({ type: "progress", processed: i + 1, total, channelId, status: "ok" });
+              } else {
+                const reason = err?.message || "Failed to unsubscribe";
+                failed.push({ channelId, reason });
+                emit({ type: "progress", processed: i + 1, total, channelId, status: "failed", reason });
+              }
+            }
+          }
+        } catch (err: any) {
+          emit({ type: "error", message: err?.message || "Failed to unsubscribe channels." });
+        }
+
+        try {
+          recordAction(db, {
+            type: "unsubscribe",
+            payload: { channelIds, titles, ...payloadExtras },
+            total,
+            succeededCount: succeeded.length,
+            failedCount: failed.length,
+            quotaStopped,
+          });
+        } catch (err) {
+          console.error("Failed to record unsubscribe action:", err);
+        }
+
+        emit({ type: "done", succeeded, failed, quotaStopped, skipped });
+        controller.close();
+      },
+    });
+
+    return new Response(stream, { headers: NDJSON_HEADERS });
+  }
 
   const server = Bun.serve({
     hostname,
@@ -218,7 +353,8 @@ export function createAppServer(options: ServerOptions = {}): Server<unknown> {
           if (authErr) return authErr;
 
           const categories = getDistinctCategories(db);
-          return Response.json({ categories });
+          const stats = getCategoryStats(db);
+          return Response.json({ categories, stats });
         },
       },
 
@@ -287,9 +423,26 @@ export function createAppServer(options: ServerOptions = {}): Server<unknown> {
               );
             }
 
+            // Snapshot titles before applying so the action log stays readable.
+            const titles = getChannelTitles(db, body.channelIds);
+
             const updatedCount = bulkTagAndCategory(db, body.channelIds, {
               category: hasCategory ? body.category : undefined,
               tags: hasTags ? validTags : undefined,
+            });
+
+            recordAction(db, {
+              type: "tag",
+              payload: {
+                channelIds: body.channelIds,
+                titles,
+                category: hasCategory ? body.category : undefined,
+                tags: hasTags ? validTags : undefined,
+              },
+              total: body.channelIds.length,
+              succeededCount: updatedCount,
+              failedCount: body.channelIds.length - updatedCount,
+              quotaStopped: false,
             });
 
             return Response.json({ updatedCount });
@@ -309,93 +462,109 @@ export function createAppServer(options: ServerOptions = {}): Server<unknown> {
             return Response.json({ error: "channelIds must be a non-empty array." }, { status: 400 });
           }
 
-          let ytClient = options.youtubeClient;
-          if (!ytClient) {
-            const redirectUri = `http://127.0.0.1:${server.port}/oauth/callback`;
-            const oauth2Client = getStoredOAuth2Client(appDataDir, redirectUri);
-            if (!oauth2Client) {
-              return Response.json({ error: "OAuth client not initialized." }, { status: 401 });
-            }
-            ytClient = createYouTubeClient(oauth2Client);
+          const clientResult = getYouTubeClientOrError();
+          if ("errorResponse" in clientResult) return clientResult.errorResponse;
+
+          return createUnsubscribeStreamResponse({
+            ytClient: clientResult.ytClient,
+            channelIds: body.channelIds,
+            interCallDelayMs: typeof body.interCallDelayMs === "number" ? body.interCallDelayMs : 250,
+          });
+        },
+      },
+
+      "/api/actions": {
+        async GET() {
+          const authErr = await authenticateRequest(appDataDir);
+          if (authErr) return authErr;
+
+          const actions = getRecentActions(db).map(serializeAction);
+          return Response.json({ actions });
+        },
+      },
+
+      "/api/actions/:id/redo": {
+        async POST(req) {
+          const authErr = await authenticateRequest(appDataDir);
+          if (authErr) return authErr;
+
+          const id = Number(req.params.id);
+          const action = Number.isInteger(id) ? getActionById(db, id) : null;
+          if (!action) {
+            return Response.json({ error: "Action not found." }, { status: 404 });
           }
 
-          const channelIds: string[] = body.channelIds;
-          const interCallDelayMs = typeof body.interCallDelayMs === "number" ? body.interCallDelayMs : 250;
-          const subRecords = getSubscriptionIds(db, channelIds);
-          const subMap = new Map(subRecords.map((r) => [r.channel_id, r.subscription_id]));
+          let payload: any = {};
+          try {
+            payload = JSON.parse(action.payload || "{}");
+          } catch {
+            payload = {};
+          }
+          const requestedIds: string[] = Array.isArray(payload.channelIds) ? payload.channelIds : [];
 
-          // Stream newline-delimited JSON progress events. A buffered JSON
-          // response would trip the connection idle timeout on large batches
-          // (250 ms delay per channel adds up), and the client needs a live
-          // progress counter anyway.
+          const body = await req.json().catch(() => null);
+          const interCallDelayMs = typeof body?.interCallDelayMs === "number" ? body.interCallDelayMs : 250;
+
+          if (action.type === "unsubscribe") {
+            const clientResult = getYouTubeClientOrError();
+            if ("errorResponse" in clientResult) return clientResult.errorResponse;
+
+            // Only re-attempt channels still present locally; the rest were
+            // already unsubscribed and are reported as skipped.
+            const stillPresent = new Set(getSubscriptionIds(db, requestedIds).map((r) => r.channel_id));
+            const toAttempt = requestedIds.filter((cid) => stillPresent.has(cid));
+            const skipped = requestedIds.filter((cid) => !stillPresent.has(cid));
+
+            return createUnsubscribeStreamResponse({
+              ytClient: clientResult.ytClient,
+              channelIds: toAttempt,
+              interCallDelayMs,
+              skipped,
+              payloadExtras: { redoOf: action.id },
+            });
+          }
+
+          // Tag actions apply instantly; emit the same NDJSON protocol so the
+          // client handles every redo identically.
+          const stillPresentTitles = getChannelTitles(db, requestedIds);
+          const applicableIds = requestedIds.filter((cid) => cid in stillPresentTitles);
+          const skipped = requestedIds.filter((cid) => !(cid in stillPresentTitles));
+
+          const updatedCount =
+            applicableIds.length > 0
+              ? bulkTagAndCategory(db, applicableIds, {
+                  category: typeof payload.category === "string" ? payload.category : undefined,
+                  tags: Array.isArray(payload.tags) ? payload.tags : undefined,
+                })
+              : 0;
+
+          recordAction(db, {
+            type: "tag",
+            payload: {
+              channelIds: applicableIds,
+              titles: stillPresentTitles,
+              category: payload.category,
+              tags: payload.tags,
+              redoOf: action.id,
+            },
+            total: applicableIds.length,
+            succeededCount: updatedCount,
+            failedCount: applicableIds.length - updatedCount,
+            quotaStopped: false,
+          });
+
           const encoder = new TextEncoder();
-          const total = channelIds.length;
-
           const stream = new ReadableStream({
-            async start(controller) {
+            start(controller) {
               const emit = (event: Record<string, unknown>) => {
                 controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
               };
-
-              const succeeded: string[] = [];
-              const failed: { channelId: string; reason: string }[] = [];
-              let quotaStopped = false;
-
-              try {
-                for (let i = 0; i < channelIds.length; i++) {
-                  const channelId = channelIds[i]!;
-                  const subscriptionId = subMap.get(channelId);
-
-                  if (!subscriptionId) {
-                    const reason = "Subscription ID not found";
-                    failed.push({ channelId, reason });
-                    emit({ type: "progress", processed: i + 1, total, channelId, status: "failed", reason });
-                    continue;
-                  }
-
-                  if (i > 0 && interCallDelayMs > 0) {
-                    await Bun.sleep(interCallDelayMs);
-                  }
-
-                  try {
-                    await ytClient.subscriptions.delete({ id: subscriptionId });
-                    succeeded.push(channelId);
-                    // Delete immediately so an interrupted batch leaves the
-                    // local DB consistent with YouTube.
-                    deleteChannels(db, [channelId]);
-                    emit({ type: "progress", processed: i + 1, total, channelId, status: "ok" });
-                  } catch (err: any) {
-                    if (isQuotaExceededError(err)) {
-                      quotaStopped = true;
-                      break;
-                    }
-                    if (isSubscriptionNotFoundError(err)) {
-                      // Already unsubscribed on YouTube; converge local state.
-                      succeeded.push(channelId);
-                      deleteChannels(db, [channelId]);
-                      emit({ type: "progress", processed: i + 1, total, channelId, status: "ok" });
-                    } else {
-                      const reason = err?.message || "Failed to unsubscribe";
-                      failed.push({ channelId, reason });
-                      emit({ type: "progress", processed: i + 1, total, channelId, status: "failed", reason });
-                    }
-                  }
-                }
-              } catch (err: any) {
-                emit({ type: "error", message: err?.message || "Failed to unsubscribe channels." });
-              }
-
-              emit({ type: "done", succeeded, failed, quotaStopped });
+              emit({ type: "progress", processed: applicableIds.length, total: applicableIds.length, status: "ok" });
+              emit({ type: "done", succeeded: applicableIds, failed: [], quotaStopped: false, skipped });
               controller.close();
             },
           });
-
-          return new Response(stream, {
-            headers: {
-              "Content-Type": "application/x-ndjson; charset=utf-8",
-              "Cache-Control": "no-store",
-            },
-          });
+          return new Response(stream, { headers: NDJSON_HEADERS });
         },
       },
 

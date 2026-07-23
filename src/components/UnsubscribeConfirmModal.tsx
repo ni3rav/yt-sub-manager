@@ -6,6 +6,8 @@ interface UnsubscribeConfirmModalProps {
   isOpen: boolean;
   selectedChannels: { channel_id: string; title: string }[];
   totalSelectedCount: number;
+  /** Optional description of the target, e.g. `category "Tech"`. */
+  targetLabel?: string;
   onConfirm: () => void;
   onCancel: () => void;
   isUnsubscribing: boolean;
@@ -16,6 +18,7 @@ export function UnsubscribeConfirmModal({
   isOpen,
   selectedChannels,
   totalSelectedCount,
+  targetLabel,
   onConfirm,
   onCancel,
   isUnsubscribing,
@@ -43,7 +46,8 @@ export function UnsubscribeConfirmModal({
             <div>
               <h3 className="text-lg font-semibold">Confirm bulk unsubscribe</h3>
               <p className="text-sm text-muted-foreground">
-                You are about to unsubscribe from {count} YouTube channel{count === 1 ? "" : "s"}.
+                You are about to unsubscribe from {count} YouTube channel{count === 1 ? "" : "s"}
+                {targetLabel ? ` in ${targetLabel}` : ""}.
               </p>
             </div>
           </div>
