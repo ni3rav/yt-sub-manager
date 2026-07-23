@@ -14,6 +14,11 @@
 import { createAppServer } from "./server";
 import indexHtml from "../dist/binary/index.html";
 
+// The compiled binary has no NODE_ENV set by default, which would make
+// Bun.serve run in development mode (HMR watcher + console streaming) and
+// burn CPU for nothing. Force production before the server starts.
+process.env.NODE_ENV = "production";
+
 const server = createAppServer({
   port: 0,
   hostname: "127.0.0.1",
